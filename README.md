@@ -13,6 +13,8 @@ The UI is built around Turbo Brilliance — 27 reasoning constructs, matching in
 - Native `reasoning_effort` (`xhigh` / medium / low / none) plus `enable_thinking`
 - Workspace file tree: pin files into the turn as fenced context (read-only)
 - Session history, regen, stop, syntax-highlighted code with copy/save
+- **Context folding**: older turns are rewritten by the model into one handoff brief before the window fills up
+- **Reply continuation**: a reply cut off by `max_tokens` resumes itself, mid-code-block included
 - KaTeX for LaTeX: `$$...$$`, `$...$`, `\[...\]`, `\(...\)`, and `align`/`equation` environments
 - Same-origin proxy so the browser never talks to `localhost` and CORS is not your problem
 - Offline demo stream if llama-server is down, so the workbench still exercises
@@ -77,6 +79,49 @@ npm start
 
 Then open the URL it prints — not the old `serve` port.
 
+## Context: budget, folding, continuation
+
+MAX MTP burns context quickly — 64k is a real session, not a lot of one. The
+workbench measures the window, folds the older turns into a brief, and resumes a
+reply that was cut off mid-code.
+
+**Budget.** `n_ctx` comes from llama-server `/props`, or from `context window` in
+Setup when you set it (0 = auto). The pill in the top bar and the **Context** tab
+show prompt tokens against `n_ctx − max_tokens − margin`, split into system prompt,
+briefs and transcript. Estimates assume ~3.6 chars/token; **measure exact** runs the
+live prompt through llama-server's `/tokenize`.
+
+**Folding.** Past the fold line (**fold at**, default 72% of the usable window) the
+older turns are rewritten into a single handoff brief — goal, stack, files in play,
+decisions, state of the work, open threads, snippets that must survive — and sent as
+a system turn ahead of the messages kept verbatim (**keep verbatim**, default 8).
+Folding is skipped when it would not pay for itself (the brief costs more than the
+messages it replaces), and falls back to a mechanical local extract when
+llama-server is unreachable. Nothing is deleted: the fold card in the transcript
+(and every entry in the Context tab) can be **unfolded**, which puts the original
+messages back into the window.
+
+**Continuation.** When a round stops on `finish_reason: "length"` the reply resumes
+itself, up to **continue rounds** times (default 2, 0 = manual only). Any reply has a
+manual **continue**. The cut-off text is sent back as a trailing assistant message
+with `continue_final_message` + `add_generation_prompt: false`, which llama-server
+resumes exactly where it stopped; a server that refuses it falls back to a resume
+directive. The resumed text is stitched into the same message with overlap trimming
+and code-fence repair, so a half-written ```ts block stays one code block.
+
+| Setting (Setup / Context tab) | Default | Effect |
+| --- | --- | --- |
+| `context window` | 0 (auto) | overrides the `n_ctx` read from `/props` |
+| `fold at` | 0.72 | fraction of the usable window that triggers a fold |
+| `keep verbatim` | 8 | messages below the fold that stay untouched |
+| `brief size` | 1600 | token cap handed to the summariser |
+| `auto-continue` | on | resume truncated replies without asking |
+| `continue rounds` | 2 | automatic resumptions per reply |
+| `continue mode` | auto | `prefill` (trailing assistant message) → `directive` fallback |
+
+In offline demo mode both features still exercise: folding falls back to the local
+extract and the demo stream answers a continuation with more code.
+
 ## Constructs (primer)
 
 Prefix is always `{REASON:…}` at the start of the user turn.
@@ -96,3 +141,6 @@ Default construct for this UI is **coder**. Switch family with the Reason / Inst
 - `Escape` stop
 - `⌘/Ctrl + N` new chat
 - `⌘/Ctrl + ,` setup
+
+Buttons: **fold** in the stage head, **compact/fold now** + **measure exact** in the
+Context tab, **continue** under any reply and in the composer bar.

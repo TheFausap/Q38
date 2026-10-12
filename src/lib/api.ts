@@ -1,9 +1,26 @@
-import type { ChatMessage, Sampling, ServerStatus, Settings, Timings } from "./types";
+import type { ChatMessage, FinishInfo, Sampling, ServerStatus, Settings, Timings } from "./types";
 
 export type StreamHandlers = {
   onReasoning: (chunk: string) => void;
   onContent: (chunk: string) => void;
   onTimings: (t: Timings, extra?: { demo?: boolean }) => void;
+  /** fired once, when the round ends (finish_reason / stop_type). */
+  onFinish?: (info: FinishInfo) => void;
+};
+
+export type ChatStreamOptions = {
+  forceDemo?: boolean;
+  /** compaction briefs injected as system turns, right after the system prompt */
+  systemExtra?: string[];
+  /**
+   * Continue a trailing assistant message instead of starting a new turn.
+   * "content" is the prefill path (llama-server honours it, older builds follow it
+   * through --prefill-assistant); "reasoning_content" resumes a thinking block.
+   */
+  continueFinal?: "content" | "reasoning_content" | null;
+  /** extra user turn appended after the transcript (directive resume). */
+  directive?: string;
+  stream?: boolean;
 };
 
 /** Static hosts (npx serve, dotnet serve) have no /api proxy. Once we see HTML/304, skip it. */
@@ -154,14 +171,46 @@ export async function fetchFile(path: string) {
   return json as { path: string; content: string; size: number };
 }
 
-function toPayload(
+/** Exact token count through llama-server's /tokenize. null when unavailable. */
+export async function countTokens(text: string, settings: Settings): Promise<number | null> {
+  if (!text) return 0;
+  const body = JSON.stringify({ content: text });
+  const post = async (url: string) => {
+    const res = await fetch(url, { method: "POST", headers: llamaHeaders(settings), body });
+    const json = (await readMaybeJson(res)) as { tokens?: unknown } | null;
+    if (!json || json.tokens === undefined) return null;
+    if (Array.isArray(json.tokens)) return json.tokens.length;
+    if (typeof json.tokens === "number") return json.tokens;
+    return null;
+  };
+  if (!proxyDead) {
+    try {
+      const n = await post("/api/llama/tokenize");
+      if (n !== null) return n;
+    } catch {
+      /* fall through to the direct path */
+    }
+  }
+  try {
+    return await post(`${upstream(settings)}/tokenize`);
+  } catch {
+    return null;
+  }
+}
+
+type WireMessage = { role: string; content: string };
+
+export function buildWireMessages(
   messages: ChatMessage[],
-  sampling: Sampling,
   settings: Settings,
-) {
-  const out: { role: string; content: string }[] = [];
+  opts: ChatStreamOptions,
+): WireMessage[] {
+  const out: WireMessage[] = [];
   if (settings.systemPrompt.trim()) {
     out.push({ role: "system", content: settings.systemPrompt.trim() });
+  }
+  for (const brief of opts.systemExtra ?? []) {
+    if (brief.trim()) out.push({ role: "system", content: brief.trim() });
   }
   for (const m of messages) {
     if (m.role === "system") continue;
@@ -174,9 +223,21 @@ function toPayload(
     }
     out.push({ role: m.role, content });
   }
-  return {
-    messages: out,
-    stream: true,
+  if (opts.directive?.trim()) {
+    out.push({ role: "user", content: opts.directive.trim() });
+  }
+  return out;
+}
+
+export function buildChatPayload(
+  messages: ChatMessage[],
+  sampling: Sampling,
+  settings: Settings,
+  opts: ChatStreamOptions,
+) {
+  const payload: Record<string, unknown> = {
+    messages: buildWireMessages(messages, settings, opts),
+    stream: opts.stream !== false,
     temperature: sampling.temperature,
     top_p: sampling.top_p,
     top_k: sampling.top_k,
@@ -188,18 +249,42 @@ function toPayload(
     reasoning_effort: sampling.reasoning_effort,
     reasoning_format: "deepseek",
   };
+  if (opts.continueFinal) {
+    // llama-server refuses continue_final_message together with add_generation_prompt.
+    payload.continue_final_message = opts.continueFinal;
+    payload.add_generation_prompt = false;
+  }
+  return payload;
+}
+
+function finishOf(json: Record<string, unknown>, current: FinishInfo): FinishInfo {
+  const next: FinishInfo = { ...current };
+  const choices = json.choices as { finish_reason?: string | null }[] | undefined;
+  const reason = choices?.[0]?.finish_reason;
+  if (typeof reason === "string" && reason) {
+    next.reason = reason;
+    if (reason === "length") next.truncated = true;
+  }
+  if (typeof json.stop_type === "string") {
+    next.stopType = json.stop_type;
+    if (json.stop_type === "limit") next.truncated = true;
+  }
+  if (json.truncated === true) next.truncated = true;
+  return next;
 }
 
 async function readSse(
   res: Response,
   handlers: StreamHandlers,
   signal: AbortSignal,
-) {
+): Promise<{ demo: boolean; finish: FinishInfo }> {
   if (!res.body) throw new Error("empty stream");
   const reader = res.body.getReader();
   const dec = new TextDecoder();
   let buf = "";
   let demo = res.headers.get("x-q38-demo") === "1";
+  let finish: FinishInfo = { reason: "", truncated: false };
+  let done = false;
 
   const consume = (data: string) => {
     if (data === "[DONE]") return true;
@@ -210,6 +295,7 @@ async function readSse(
       return false;
     }
     if (json.demo) demo = true;
+    finish = finishOf(json, finish);
     const choices = json.choices as
       | { delta?: Record<string, string>; message?: Record<string, string> }[]
       | undefined;
@@ -230,8 +316,8 @@ async function readSse(
   };
 
   while (!signal.aborted) {
-    const { value, done } = await reader.read();
-    if (done) break;
+    const { value, done: streamDone } = await reader.read();
+    if (streamDone) break;
     buf += dec.decode(value, { stream: true });
     const lines = buf.split(/\r?\n/);
     buf = lines.pop() ?? "";
@@ -239,13 +325,19 @@ async function readSse(
       const trimmed = line.trim();
       if (!trimmed.startsWith("data:")) continue;
       const data = trimmed.slice(5).trim();
-      if (consume(data)) return { demo };
+      if (consume(data)) {
+        done = true;
+        break;
+      }
     }
+    if (done) break;
   }
-  if (buf.trim().startsWith("data:")) {
+  if (!done && buf.trim().startsWith("data:")) {
     consume(buf.trim().slice(5).trim());
   }
-  return { demo };
+  if (finish.truncated && !finish.reason) finish.reason = "length";
+  handlers.onFinish?.(finish);
+  return { demo, finish };
 }
 
 async function openChatStream(
@@ -288,15 +380,14 @@ export async function streamChat(
   settings: Settings,
   handlers: StreamHandlers,
   signal: AbortSignal,
-  forceDemo = false,
-): Promise<{ demo: boolean }> {
-  const payload = toPayload(messages, sampling, settings);
-  const headers = llamaHeaders(settings);
+  opts: ChatStreamOptions = {},
+): Promise<{ demo: boolean; finish: FinishInfo }> {
+  const payload = buildChatPayload(messages, sampling, settings, opts);
 
-  if (!forceDemo && !proxyDead) {
+  if (!opts.forceDemo && !proxyDead) {
     const proxied = await openChatStream(
       "/api/llama/v1/chat/completions",
-      headers,
+      llamaHeaders(settings),
       payload,
       signal,
     );
@@ -307,7 +398,7 @@ export async function streamChat(
     }
   }
 
-  if (!forceDemo) {
+  if (!opts.forceDemo) {
     const direct = await openChatStream(
       `${upstream(settings)}/v1/chat/completions`,
       llamaHeaders(settings, { Accept: "text/event-stream" }),
@@ -320,10 +411,15 @@ export async function streamChat(
   }
 
   if (!proxyDead) {
-    const demoRes = await openChatStream("/api/demo/chat", { "Content-Type": "application/json" }, payload, signal);
+    const demoRes = await openChatStream(
+      "/api/demo/chat",
+      { "Content-Type": "application/json" },
+      payload,
+      signal,
+    );
     if (demoRes && demoRes !== "static") {
-      await readSse(demoRes, handlers, signal);
-      return { demo: true };
+      const out = await readSse(demoRes, handlers, signal);
+      return { ...out, demo: true };
     }
     if (demoRes === "static") proxyDead = true;
   }
@@ -333,6 +429,80 @@ export async function streamChat(
       ? `No Q38 proxy on this host, and llama-server at ${upstream(settings)} did not stream. After npm run build use npm start (not npx serve / dotnet serve). If you stay on a static host, enable CORS on llama-server and check Setup → URL.`
       : `llama-server unreachable at ${upstream(settings)}`,
   );
+}
+
+export type CompletionResult = {
+  content: string;
+  reasoning: string;
+  model?: string;
+  finish: FinishInfo;
+};
+
+/**
+ * One non-streaming round, used for context folding. Returns null when no
+ * server could answer, so the caller can fall back to a local brief.
+ */
+export async function completeOnce(
+  wire: { role: string; content: string }[],
+  settings: Settings,
+  opts: { maxTokens: number; temperature?: number; top_p?: number } = { maxTokens: 1024 },
+): Promise<CompletionResult | null> {
+  const payload = {
+    messages: wire,
+    stream: false,
+    temperature: opts.temperature ?? 0.2,
+    top_p: opts.top_p ?? 0.9,
+    top_k: 40,
+    max_tokens: opts.maxTokens,
+    cache_prompt: true,
+    chat_template_kwargs: { enable_thinking: false },
+    reasoning_effort: "none",
+    reasoning_format: "deepseek",
+  };
+
+  const parse = (json: unknown): CompletionResult | null => {
+    if (!json || typeof json !== "object") return null;
+    const j = json as Record<string, unknown>;
+    const choices = j.choices as
+      | { message?: Record<string, unknown>; finish_reason?: string | null }[]
+      | undefined;
+    const msg = choices?.[0]?.message;
+    if (!msg) return null;
+    const content = typeof msg.content === "string" ? msg.content : "";
+    const reasoning = typeof msg.reasoning_content === "string" ? msg.reasoning_content : "";
+    if (!content.trim() && !reasoning.trim()) return null;
+    const reason = choices?.[0]?.finish_reason;
+    return {
+      content,
+      reasoning,
+      model: typeof j.model === "string" ? j.model : undefined,
+      finish: {
+        reason: typeof reason === "string" ? reason : "",
+        truncated: reason === "length" || j.stop_type === "limit" || j.truncated === true,
+        stopType: typeof j.stop_type === "string" ? j.stop_type : undefined,
+      },
+    };
+  };
+
+  const post = async (url: string) => {
+    const res = await fetch(url, { method: "POST", headers: llamaHeaders(settings), body: JSON.stringify(payload) });
+    const json = await readMaybeJson(res);
+    return json ? parse(json) : null;
+  };
+
+  if (!proxyDead) {
+    try {
+      const out = await post("/api/llama/v1/chat/completions");
+      if (out) return out;
+    } catch {
+      /* server answered with an error — try the direct origin before giving up */
+    }
+  }
+  try {
+    return await post(`${upstream(settings)}/v1/chat/completions`);
+  } catch {
+    return null;
+  }
 }
 
 export function guessLang(path: string): string {
