@@ -16,6 +16,16 @@ export type Timings = {
   cache_n?: number;
 };
 
+/** How a stream ended. llama.cpp reports `finish_reason` + `stop_type`. */
+export type FinishInfo = {
+  /** "stop" | "length" | "tool_calls" | "" */
+  reason: string;
+  /** true when the model was cut off by max_tokens / n_predict rather than EOS. */
+  truncated: boolean;
+  /** llama.cpp only: eos | word | limit | none */
+  stopType?: string;
+};
+
 export type ChatMessage = {
   id: string;
   role: Role;
@@ -26,6 +36,35 @@ export type ChatMessage = {
   timings?: Timings;
   demo?: boolean;
   error?: string;
+  /** finish_reason of the round that produced this message. */
+  finishReason?: string;
+  /** true when the round hit max_tokens (reply can be continued). */
+  truncated?: boolean;
+  /** how many continuation rounds have been stitched into this message. */
+  continues?: number;
+};
+
+/**
+ * A context fold: every message up to and including `upToId` is replaced, in the
+ * prompt and in the transcript, by one handoff brief.
+ */
+export type Compaction = {
+  id: string;
+  at: number;
+  /** id of the last message folded into `summary` (inclusive). */
+  upToId: string;
+  /** how many messages were folded away. */
+  foldedMessages: number;
+  summary: string;
+  /** prompt tokens removed from the window. */
+  tokensBefore: number;
+  /** prompt tokens the brief costs. */
+  tokensAfter: number;
+  /** true when the workbench compacted on its own before sending. */
+  auto: boolean;
+  /** who wrote the brief. */
+  source: "model" | "local";
+  model?: string;
 };
 
 export type ModeFamily = "reasoning" | "instruct" | "xhigh";
@@ -69,13 +108,33 @@ export type Session = {
   modeId: string;
   family: ModeFamily;
   messages: ChatMessage[];
+  /** context folds, oldest first. The last one is the active brief. */
+  compactions?: Compaction[];
 };
+
+export type ContinueMode = "auto" | "prefill" | "directive";
 
 export type Settings = {
   llamaUrl: string;
   apiKey: string;
   systemPrompt: string;
   autoCollapseThink: boolean;
+  /** context window in tokens; 0 = read n_ctx from llama-server /props */
+  contextSize: number;
+  /** fold the transcript automatically when the window fills up */
+  autoCompact: boolean;
+  /** fold once the next prompt crosses this fraction of the usable window */
+  compactAt: number;
+  /** messages kept verbatim below the fold */
+  keepTailMessages: number;
+  /** token cap for one handoff brief */
+  summaryMaxTokens: number;
+  /** keep streaming when the model hits max_tokens mid-reply */
+  autoContinue: boolean;
+  /** extra rounds per reply (0 = manual only) */
+  maxContinues: number;
+  /** assistant-prefill continuation, prompt directive, or prefill with fallback */
+  continueMode: ContinueMode;
 };
 
 export type FileNode = {
@@ -112,11 +171,19 @@ export const DEFAULT_SAMPLING: Sampling = {
   inject_mode_tag: true,
 };
 
-export const DEFAULT_SYSTEM = `You are Q38, a coding workbench running DavidAU's Qwen3.8-27B Turbo-Brilliance (NEO MAX MTP) via llama-server. Prefer complete, production-ready code over sketches. Match the user's stack and surrounding files. Fence every code block with a language tag. When editing an existing file, return the full file or a focused unified diff — never omit the middle with comments like "// ... rest of file". Keep prose tight; be thorough in code.`;
+export const DEFAULT_SYSTEM = `You are Q38, a coding workbench running DavidAU's Qwen3.8-27B Turbo-Brilliance (NEO MAX MTP) via llama-server. Prefer complete, production-ready code over sketches. Match the user's stack and surrounding files. Fence every code block with a language tag. When editing an existing file, return the full file or a focused unified diff — never omit the middle with comments like "// ... rest of file". Keep prose tight; be thorough in code. If you are resumed mid-answer, continue exactly where you stopped instead of restarting.`;
 
 export const DEFAULT_SETTINGS: Settings = {
   llamaUrl: "http://127.0.0.1:8080",
   apiKey: "",
   systemPrompt: DEFAULT_SYSTEM,
   autoCollapseThink: true,
+  contextSize: 0,
+  autoCompact: true,
+  compactAt: 0.72,
+  keepTailMessages: 8,
+  summaryMaxTokens: 1600,
+  autoContinue: true,
+  maxContinues: 2,
+  continueMode: "auto",
 };

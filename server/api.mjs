@@ -148,7 +148,60 @@ function sendJson(res, status, payload) {
   res.end(body);
 }
 
-function demoChunks() {
+function lastMessage(payload) {
+  const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+  return messages.length ? messages[messages.length - 1] : null;
+}
+
+/**
+ * Is this request the workbench resuming a cut-off reply? llama.cpp continues a
+ * trailing assistant message; the directive fallback shows up as a user turn that
+ * says the previous reply was cut off.
+ */
+function isContinuation(payload) {
+  if (!payload || typeof payload !== "object") return false;
+  if (payload.continue_final_message === "content" || payload.continue_final_message === "reasoning_content") {
+    return true;
+  }
+  if (payload.add_generation_prompt === false) return true;
+  const last = lastMessage(payload);
+  if (last && last.role === "assistant") return true;
+  return Boolean(last && last.role === "user" && /cut off by the token limit/i.test(String(last.content || "")));
+}
+
+function demoContinuation() {
+  const content = `
+Also worth wiring in — a cancellation-aware SSE reader, since llama-server streams event-stream frames:
+
+\`\`\`ts
+export async function* readSse(res: Response, signal: AbortSignal) {
+  if (!res.body) throw new Error("empty stream");
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (!signal.aborted) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (data === "[DONE]") return;
+      yield JSON.parse(data) as Record<string, unknown>;
+    }
+  }
+}
+\`\`\`
+
+Pass it the request's \`AbortSignal\` and history stops growing the moment the user hits **stop** — no orphaned timers, no half-written file.
+`.trim();
+  return { reasoning: [""], content };
+}
+
+function demoChunks(payload) {
+  if (isContinuation(payload)) return demoContinuation();
   const reasoning = [
     "The user wants production-quality code from the coder construct.",
     " I'll keep the surface small, stream tokens, and return a complete module rather than a sketch.",
@@ -230,12 +283,12 @@ function sseWrite(res, obj) {
   res.write(`data: ${JSON.stringify(obj)}\n\n`);
 }
 
-async function streamDemo(res) {
+async function streamDemo(res, payload) {
   res.statusCode = 200;
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("X-Q38-Demo", "1");
-  const { reasoning, content } = demoChunks();
+  const { reasoning, content } = demoChunks(payload);
   sseWrite(res, {
     choices: [{ delta: { reasoning_content: reasoning.join("") } }],
   });
@@ -478,7 +531,14 @@ export function createApi() {
       }
 
       if (url.pathname === "/api/demo/chat" && req.method === "POST") {
-        await streamDemo(res);
+        const raw = await readBody(req);
+        let payload = null;
+        try {
+          payload = JSON.parse(raw.toString("utf8"));
+        } catch {
+          payload = null;
+        }
+        await streamDemo(res, payload);
         return;
       }
 

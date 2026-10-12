@@ -1,29 +1,63 @@
 import { useMemo, useState } from "react";
+import {
+  compactionNetSavings,
+  contextSourceLabel,
+  formatPct,
+  formatTokens,
+  type ContextUsage,
+} from "../lib/context";
 import { GROUPS, familyLabel, modeById, MODES, reasonTag } from "../lib/modes";
-import type { ModeFamily, Sampling, ServerStatus } from "../lib/types";
+import type { Compaction, ModeFamily, Sampling, ServerStatus, Settings } from "../lib/types";
+
+export type InspectorTab = "construct" | "sample" | "context" | "server";
+
+const TABS: InspectorTab[] = ["construct", "sample", "context", "server"];
 
 export function Inspector({
+  tab,
+  onTab,
   modeId,
   family,
   onMode,
   onFamily,
   sampling,
   onSampling,
+  settings,
+  onSettings,
   status,
   preview,
   onAskHelp,
+  usage,
+  compactions,
+  exactTokens,
+  onMeasure,
+  onFold,
+  onUnfold,
+  folding,
+  streaming,
 }: {
+  tab: InspectorTab;
+  onTab: (t: InspectorTab) => void;
   modeId: string;
   family: ModeFamily;
   onMode: (id: string) => void;
   onFamily: (f: ModeFamily) => void;
   sampling: Sampling;
   onSampling: (s: Sampling) => void;
+  settings: Settings;
+  onSettings: (s: Settings) => void;
   status: ServerStatus | null;
   preview: { path: string; content: string } | null;
   onAskHelp: () => void;
+  usage: ContextUsage;
+  compactions: Compaction[];
+  exactTokens: number | null;
+  onMeasure: () => void;
+  onFold: () => void;
+  onUnfold: (index: number) => void;
+  folding: boolean;
+  streaming: boolean;
 }) {
-  const [tab, setTab] = useState<"construct" | "sample" | "server">("construct");
   const [q, setQ] = useState("");
   const mode = modeById(modeId);
   const tag = reasonTag(family, modeId);
@@ -41,16 +75,21 @@ export function Inspector({
 
   const set = <K extends keyof Sampling>(key: K, value: Sampling[K]) =>
     onSampling({ ...sampling, [key]: value });
+  const setSetting = <K extends keyof Settings>(key: K, value: Settings[K]) =>
+    onSettings({ ...settings, [key]: value });
+
+  const savedTotal = compactions.reduce((n, c) => n + Math.max(0, compactionNetSavings(c)), 0);
+  const meterPct = Math.max(0, Math.min(1, usage.pct));
 
   return (
     <aside className="rail right">
       <div className="tabs">
-        {(["construct", "sample", "server"] as const).map((t) => (
+        {TABS.map((t) => (
           <button
             key={t}
             type="button"
             className={tab === t ? "tab on" : "tab"}
-            onClick={() => setTab(t)}
+            onClick={() => onTab(t)}
           >
             {t}
           </button>
@@ -218,6 +257,214 @@ export function Inspector({
         </div>
       )}
 
+      {tab === "context" && (
+        <div className="rail-scroll sample-form">
+          <div className="meter">
+            <div className="meter-bar">
+              <span className={usage.pct >= 1 ? "fill over" : "fill"} style={{ width: `${meterPct * 100}%` }} />
+              <span
+                className="meter-mark"
+                style={{ left: `${Math.min(100, settings.compactAt * 100)}%` }}
+                title={`auto-fold at ${formatPct(settings.compactAt)}`}
+              />
+            </div>
+            <div className="meter-nums">
+              <strong className={usage.pct >= settings.compactAt ? "hot-text" : ""}>
+                {formatTokens(usage.used)}
+              </strong>
+              <span className="muted tiny">
+                / {formatTokens(usage.budget.budget)} prompt tokens · {formatPct(usage.pct)} · window{" "}
+                {formatTokens(usage.budget.nCtx)}
+              </span>
+            </div>
+            <dl className="kv tight">
+              <dt>budget source</dt>
+              <dd>{contextSourceLabel(usage.budget.source, status?.props ?? null)}</dd>
+              <dt>reply reserve</dt>
+              <dd>
+                {formatTokens(usage.budget.reserve)} tokens (max_tokens) + {usage.budget.margin} margin
+              </dd>
+              <dt>in window</dt>
+              <dd>
+                {usage.messages} messages
+                {usage.foldedMessages > 0 ? ` · ${usage.foldedMessages} folded into briefs` : ""}
+              </dd>
+              <dt>composition</dt>
+              <dd className="break">
+                system {formatTokens(usage.systemTokens)} · briefs {formatTokens(usage.summaryTokens)} ·
+                transcript {formatTokens(usage.historyTokens)}
+              </dd>
+              {exactTokens !== null && (
+                <>
+                  <dt>measured</dt>
+                  <dd>{formatTokens(exactTokens)} tokens (llama-server /tokenize)</dd>
+                </>
+              )}
+            </dl>
+            {usage.pct >= 1 && (
+              <p className="warn-line">
+                Over budget by {formatTokens(usage.over)} tokens — the server will start dropping the
+                oldest context. Fold, or start a new chat.
+              </p>
+            )}
+            {usage.pct >= settings.compactAt && usage.pct < 1 && settings.autoCompact && (
+              <p className="muted tiny">
+                Past the fold line — the next send folds the older turns automatically.
+              </p>
+            )}
+          </div>
+
+          <div className="row-actions">
+            <button type="button" className="btn" onClick={onFold} disabled={folding || streaming}>
+              {folding ? "folding…" : "fold now"}
+            </button>
+            <button type="button" className="btn" onClick={onMeasure}>
+              measure exact
+            </button>
+          </div>
+
+          <label className="tiny-check block">
+            <input
+              type="checkbox"
+              checked={settings.autoCompact}
+              onChange={(e) => setSetting("autoCompact", e.target.checked)}
+            />
+            fold automatically when the window fills up
+          </label>
+          <Slider
+            label="fold at"
+            min={0.4}
+            max={0.95}
+            step={0.01}
+            value={settings.compactAt}
+            onChange={(v) => setSetting("compactAt", v)}
+            suffix=" of window"
+          />
+          <Slider
+            label="keep verbatim"
+            min={2}
+            max={40}
+            step={1}
+            value={settings.keepTailMessages}
+            onChange={(v) => setSetting("keepTailMessages", v)}
+            suffix=" messages"
+          />
+          <Slider
+            label="brief size"
+            min={512}
+            max={4096}
+            step={128}
+            value={settings.summaryMaxTokens}
+            onChange={(v) => setSetting("summaryMaxTokens", v)}
+            suffix=" tokens"
+          />
+          <label className="field">
+            <span>context window (0 = /props n_ctx)</span>
+            <input
+              type="number"
+              min={0}
+              step={1024}
+              value={settings.contextSize}
+              onChange={(e) =>
+                setSetting("contextSize", Math.max(0, Number(e.target.value) || 0))
+              }
+              placeholder="0"
+            />
+          </label>
+
+          <p className="hint">
+            Folding asks the model to rewrite the older turns into one handoff brief — goal, files,
+            decisions, open threads, snippets that must survive — then keeps only the last{" "}
+            {settings.keepTailMessages} messages verbatim. If llama-server is offline the brief is a
+            local extract instead.
+          </p>
+
+          <div className="row-actions">
+            <label className="tiny-check">
+              <input
+                type="checkbox"
+                checked={settings.autoContinue}
+                onChange={(e) => setSetting("autoContinue", e.target.checked)}
+              />
+              auto-continue truncated replies
+            </label>
+          </div>
+          <Slider
+            label="continue rounds"
+            min={0}
+            max={6}
+            step={1}
+            value={settings.maxContinues}
+            onChange={(v) => setSetting("maxContinues", v)}
+            suffix=" auto"
+          />
+          <label className="field">
+            <span>continue mode</span>
+            <select
+              value={settings.continueMode}
+              onChange={(e) => setSetting("continueMode", e.target.value as Settings["continueMode"])}
+            >
+              <option value="auto">auto — prefill, then directive fallback</option>
+              <option value="prefill">prefill only (assistant message)</option>
+              <option value="directive">directive only (extra prompt turn)</option>
+            </select>
+          </label>
+          <p className="hint">
+            Prefill hands the cut-off text back as a trailing assistant message
+            (<code>continue_final_message</code>); llama-server resumes it without repeating. A
+            server that refuses falls back to a resume directive.
+          </p>
+
+          <div className="group-label">Folds ({compactions.length})</div>
+          {compactions.length === 0 && <p className="muted pad">Nothing folded yet.</p>}
+          {compactions.length > 0 && (
+            <p className="muted tiny">
+              {formatTokens(savedTotal)} tokens reclaimed in total. The newest brief is the one in
+              the window.
+            </p>
+          )}
+          {compactions.map((c, i) => {
+            const saved = compactionNetSavings(c);
+            const activeRow = i === compactions.length - 1;
+            return (
+              <div key={c.id} className={`fold-row ${activeRow ? "on" : ""}`}>
+                <div className="fold-row-head">
+                  <span>
+                    #{i + 1} · {c.foldedMessages} msgs ·{" "}
+                    {new Date(c.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                  </span>
+                  <span className="grow" />
+                  <span className="muted tiny">
+                    {formatTokens(c.tokensBefore)} → {formatTokens(c.tokensAfter)}
+                    {saved > 0 ? ` (−${formatTokens(saved)})` : ""}
+                  </span>
+                </div>
+                <div className="muted tiny">
+                  {c.source === "model" ? `model brief${c.model ? ` · ${c.model}` : ""}` : "local extract"}
+                  {c.auto ? " · automatic" : " · manual"}
+                  {activeRow ? " · in window" : ""}
+                </div>
+                <div className="row-actions">
+                  <button
+                    type="button"
+                    className="linkish"
+                    onClick={() => onUnfold(i)}
+                    disabled={streaming}
+                    title="Drop this fold and every later one — the messages come back into the window"
+                  >
+                    unfold from here
+                  </button>
+                </div>
+                <details className="fold-details">
+                  <summary>brief</summary>
+                  <pre>{c.summary.slice(0, 6000)}</pre>
+                </details>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {tab === "server" && (
         <div className="rail-scroll">
           <p className="hint">
@@ -237,14 +484,7 @@ export function Inspector({
             <dd className="break">{status?.workspace ?? "—"}</dd>
           </dl>
           <pre className="cmd">
-            {`llama-server \\
-  -m Qwen3.8-27B-Turbo-Brilliance-50X-RI-NEO-MAX-MTP-Q6_K.gguf \\
-  --alias q38-max --host 0.0.0.0 --port 8080 \\
-  -c 65536 -ngl 99 -fa on --jinja \\
-  --reasoning-format deepseek \\
-  --temp 0.7 --top-k 64 --min-p 0.05 --top-p 0.95 \\
-  --repeat-penalty 1.0 \\
-  --spec-type draft-mtp --spec-draft-n-max 3`}
+            {`llama-server \\\n  -m Qwen3.8-27B-Turbo-Brilliance-50X-RI-NEO-MAX-MTP-Q6_K.gguf \\\n  --alias q38-max --host 0.0.0.0 --port 8080 \\\n  -c 65536 -ngl 99 -fa on --jinja \\\n  --reasoning-format deepseek \\\n  --temp 0.7 --top-k 64 --min-p 0.05 --top-p 0.95 \\\n  --repeat-penalty 1.0 \\\n  --spec-type draft-mtp --spec-draft-n-max 3`}
           </pre>
           {preview && (
             <div className="preview">
@@ -267,6 +507,7 @@ function Slider({
   step,
   value,
   onChange,
+  suffix,
 }: {
   label: string;
   min: number;
@@ -274,12 +515,15 @@ function Slider({
   step: number;
   value: number;
   onChange: (v: number) => void;
+  suffix?: string;
 }) {
+  const shown =
+    step < 1 ? `${value.toFixed(2)}${suffix ?? ""}` : `${value}${suffix ?? ""}`;
   return (
     <label className="field">
       <span>
         {label}
-        <b>{Number.isInteger(step) ? value : value.toFixed(2)}</b>
+        <b>{shown}</b>
       </span>
       <input
         type="range"

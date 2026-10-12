@@ -614,3 +614,156 @@ button { cursor: pointer; }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: #2e2922; border-radius: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------------------------------------------------------------- context */
+/* Token meter, fold cards, continue affordances. */
+
+.ctx-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: #16130f;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 5px 11px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.ctx-pill:hover { border-color: var(--brass); color: var(--brass-2); }
+.ctx-pill i {
+  width: 34px;
+  height: 4px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--brass) var(--fill, 0%), #2b251d var(--fill, 0%));
+}
+.ctx-pill.hot { color: var(--brass-2); border-color: #6a5136; }
+.ctx-pill.busy { color: var(--think); }
+.ctx-pill.busy i { background: #2b251d; }
+
+.ctx-read { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.ctx-read.hot { color: var(--brass-2); }
+.hot-text { color: var(--brass-2); }
+.stage-head-right { display: flex; align-items: center; gap: 10px; }
+
+.badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: #17140f;
+  color: var(--muted);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.badge.warn { border-color: #6a332c; color: #e0a294; background: #1d1512; }
+
+.continue-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-top: 10px;
+  border-top: 1px dashed var(--line);
+  padding-top: 8px;
+}
+.continue-row .linkish { width: auto; margin: 0; font-size: 12.5px; }
+.continue-row .linkish:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.banner.fold {
+  background: #141a18;
+  color: #a8d0c4;
+  border-bottom-color: #24302c;
+}
+.banner.fold .icon-btn { padding: 3px 8px; font-size: 11px; }
+
+.fold-card {
+  margin: 18px 0;
+  border: 1px solid #2a3330;
+  border-left: 2px solid var(--code);
+  background: rgba(159, 208, 200, 0.035);
+  border-radius: var(--radius);
+}
+.fold-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+.fold-mark { color: var(--code); }
+.fold-title { font-family: var(--mono); letter-spacing: 0.06em; color: var(--code); }
+.fold-meta { color: var(--dim); font-size: 11px; font-family: var(--mono); }
+.fold-head .icon-btn { padding: 3px 8px; font-size: 11px; }
+.fold-body {
+  border-top: 1px solid #232b29;
+  padding: 12px 14px 2px;
+  max-height: 460px;
+  overflow: auto;
+  font-size: 13px;
+}
+.fold-body .md { color: #cfe3de; }
+
+.meter { margin-bottom: 14px; }
+.meter-bar {
+  position: relative;
+  height: 8px;
+  border-radius: 5px;
+  background: #1c1913;
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+.meter-bar .fill {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #8faf72, var(--brass));
+  transition: width 0.25s ease;
+}
+.meter-bar .fill.over { background: linear-gradient(90deg, var(--brass), var(--bad)); }
+.meter-mark {
+  position: absolute;
+  top: -2px;
+  width: 1px;
+  height: 12px;
+  background: var(--dim);
+}
+.meter-nums { display: flex; align-items: baseline; gap: 8px; margin: 8px 0 12px; }
+.meter-nums strong { font-family: var(--mono); font-size: 20px; color: var(--ink); font-weight: 600; }
+.kv.tight { gap: 4px 10px; font-size: 11.5px; }
+.warn-line { color: #e0a294; font-size: 12px; margin: 8px 0 0; }
+
+.row-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 12px; }
+.row-actions .btn { padding: 5px 12px; font-size: 12px; }
+
+.fold-row {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: #14120f;
+}
+.fold-row.on { border-color: #2a3330; background: #141a18; }
+.fold-row-head { display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-size: 11.5px; }
+.fold-row .linkish { width: auto; margin: 6px 0 0; font-size: 12px; }
+.fold-details { margin-top: 6px; }
+.fold-details summary {
+  cursor: pointer;
+  color: var(--dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+.fold-details pre {
+  margin: 8px 0 2px;
+  padding: 8px;
+  background: #100e0c;
+  border: 1px solid var(--line);
+  font-size: 11px;
+  white-space: pre-wrap;
+  color: #bdb3a4;
+  max-height: 260px;
+  overflow: auto;
+}

@@ -29,8 +29,17 @@ function write(key: string, value: unknown) {
   }
 }
 
+/** Tolerate transcripts written before folding existed. */
+function normalizeSession(s: Session): Session {
+  return {
+    ...s,
+    messages: Array.isArray(s.messages) ? s.messages : [],
+    compactions: Array.isArray(s.compactions) ? s.compactions : [],
+  };
+}
+
 export function loadSessions(): Session[] {
-  return read<Session[]>(SESS_KEY, []);
+  return read<Session[]>(SESS_KEY, []).map(normalizeSession);
 }
 
 export function saveSessions(sessions: Session[]) {
