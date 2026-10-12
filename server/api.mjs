@@ -1,6 +1,7 @@
 import fs from "node:fs";
+import http from "node:http";
+import https from "node:https";
 import path from "node:path";
-import { Readable } from "node:stream";
 
 const SKIP_DIRS = new Set([
   "node_modules",
@@ -264,54 +265,121 @@ async function streamDemo(res) {
   res.end();
 }
 
-async function proxyLlama(req, res, url) {
-  const upstreamHeader = req.headers["x-llama-upstream"];
-  const upstream = String(upstreamHeader || defaultUpstream()).replace(/\/$/, "");
-  const rest = url.pathname.replace(/^\/api\/llama/, "") + url.search;
-  const target = upstream + (rest || "/");
-  const headers = {};
-  const pass = ["content-type", "authorization", "accept"];
-  for (const key of pass) {
-    const v = req.headers[key];
-    if (typeof v === "string") headers[key] = v;
-  }
-  if (!headers.authorization && process.env.LLAMA_API_KEY) {
-    headers.authorization = `Bearer ${process.env.LLAMA_API_KEY}`;
-  }
-  const method = req.method || "GET";
-  const body =
-    method === "GET" || method === "HEAD" ? undefined : await readBody(req);
+const HOP_BY_HOP = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailers",
+  "transfer-encoding",
+  "upgrade",
+]);
 
-  let upstreamRes;
-  try {
-    upstreamRes = await fetch(target, {
-      method,
-      headers,
-      body,
-      signal: AbortSignal.timeout(1000 * 60 * 30),
+function proxyLlama(req, res, url) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+
+    const upstreamHeader = req.headers["x-llama-upstream"];
+    const upstream = String(upstreamHeader || defaultUpstream()).replace(/\/$/, "");
+    const rest = url.pathname.replace(/^\/api\/llama/, "") + url.search;
+    let target;
+    try {
+      target = new URL(rest || "/", `${upstream}/`);
+    } catch (err) {
+      sendJson(res, 500, {
+        error: "bad llama-server URL",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+      finish();
+      return;
+    }
+
+    const method = req.method || "GET";
+    const lib = target.protocol === "https:" ? https : http;
+
+    const run = async () => {
+      const body =
+        method === "GET" || method === "HEAD" ? undefined : await readBody(req);
+      const headers = {};
+      const pass = ["content-type", "authorization", "accept"];
+      for (const key of pass) {
+        const v = req.headers[key];
+        if (typeof v === "string") headers[key] = v;
+      }
+      if (!headers.authorization && process.env.LLAMA_API_KEY) {
+        headers.authorization = `Bearer ${process.env.LLAMA_API_KEY}`;
+      }
+      headers.host = target.host;
+      if (body) headers["content-length"] = String(Buffer.byteLength(body));
+
+      const proxyReq = lib.request(
+        target,
+        { method, headers },
+        (proxyRes) => {
+          req.socket?.setTimeout(0);
+          proxyRes.socket?.setTimeout(0);
+          if (res.writableEnded) {
+            proxyRes.destroy();
+            finish();
+            return;
+          }
+          const out = { "x-q38-upstream": upstream };
+          for (const [k, v] of Object.entries(proxyRes.headers)) {
+            if (v == null || HOP_BY_HOP.has(k.toLowerCase())) continue;
+            out[k] = v;
+          }
+          res.writeHead(proxyRes.statusCode || 502, out);
+
+          const kill = () => {
+            if (!proxyRes.destroyed) proxyRes.destroy();
+            if (!res.writableEnded) res.destroy();
+            finish();
+          };
+          proxyRes.on("error", kill);
+          res.on("error", kill);
+          proxyRes.pipe(res);
+          res.on("finish", finish);
+          res.on("close", () => {
+            if (!res.writableFinished) proxyRes.destroy();
+            finish();
+          });
+        },
+      );
+
+      proxyReq.setTimeout(0);
+      proxyReq.on("error", (err) => {
+        if (!res.headersSent) {
+          sendJson(res, 502, {
+            error: `llama-server unreachable at ${upstream}`,
+            detail: err.message,
+          });
+        } else if (!res.writableEnded) {
+          res.destroy();
+        }
+        finish();
+      });
+      res.on("close", () => {
+        if (!res.writableFinished && !proxyReq.destroyed) proxyReq.destroy();
+      });
+      if (body) proxyReq.end(body);
+      else proxyReq.end();
+    };
+
+    run().catch((err) => {
+      if (!res.headersSent) {
+        sendJson(res, 500, {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      finish();
     });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    sendJson(res, 502, {
-      error: `llama-server unreachable at ${upstream}`,
-      detail: msg,
-    });
-    return;
-  }
-
-  const outHeaders = {};
-  const ct = upstreamRes.headers.get("content-type");
-  if (ct) outHeaders["content-type"] = ct;
-  const cache = upstreamRes.headers.get("cache-control");
-  if (cache) outHeaders["cache-control"] = cache;
-  outHeaders["x-q38-upstream"] = upstream;
-  res.writeHead(upstreamRes.status, outHeaders);
-
-  if (!upstreamRes.body) {
-    res.end();
-    return;
-  }
-  Readable.fromWeb(upstreamRes.body).pipe(res);
+  });
 }
 
 async function statusPayload(req) {

@@ -49,7 +49,7 @@ npm install
 npm run dev
 ```
 
-Vite binds `0.0.0.0:5173`. The bundled middleware exposes:
+Vite binds `0.0.0.0:5173`. Long generations (slow GPU, big `xhigh` traces) are streamed with **no idle timeout** — stop with the UI button or Escape. The bundled middleware exposes:
 
 | Route | Role |
 | --- | --- |
