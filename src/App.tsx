@@ -95,8 +95,9 @@ export function App() {
         health: null,
         models: [],
         props: null,
-        error: "proxy unreachable",
+        error: "could not reach /api/status or llama-server",
         workspace: "",
+        via: "none",
       });
     }
   }, [settings]);
@@ -392,6 +393,21 @@ export function App() {
         </button>
       </header>
 
+      {status?.via === "direct" && (
+        <div className="banner warn">
+          <span>
+            Static host has no /api proxy (that 304 on /api/status is index.html). Talking to{" "}
+            {status.upstream} directly. Prefer <code>npm start</code> after <code>npm run build</code>
+            — not <code>npx serve</code> / <code>dotnet serve</code>.
+          </span>
+        </div>
+      )}
+      {status?.via === "none" && status?.error && (
+        <div className="banner warn">
+          <span>{status.error}</span>
+        </div>
+      )}
+
       {modeWarn && (
         <div className="banner warn">
           <span>{modeWarn}</span>
@@ -468,10 +484,15 @@ export function App() {
 
 function StatusPill({ status }: { status: ServerStatus | null }) {
   const ok = !!status?.ok;
+  const label = ok
+    ? status?.via === "direct"
+      ? "llama-server · direct"
+      : "llama-server"
+    : "offline";
   return (
     <div className={`status ${ok ? "ok" : "down"}`}>
       <i />
-      {ok ? "llama-server" : "offline"}
+      {label}
     </div>
   );
 }

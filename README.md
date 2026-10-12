@@ -63,8 +63,18 @@ Point **Setup → llama-server URL** at your server (default `http://127.0.0.1:8
 
 ```bash
 npm run build
-npm run preview
+npm start          # serves dist/ AND the /api proxy  (port 4173)
 ```
+
+`npm run preview` also includes the proxy. **Do not** use `npx serve dist`, `dotnet serve`, or any other static file host: `/api/status` then becomes `index.html` (often a 304) and the UI cannot reach llama-server.
+
+If you already built, from the repo root:
+
+```bash
+npm start
+```
+
+Then open the URL it prints — not the old `serve` port.
 
 ## Constructs (primer)
 

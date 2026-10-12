@@ -6,39 +6,152 @@ export type StreamHandlers = {
   onTimings: (t: Timings, extra?: { demo?: boolean }) => void;
 };
 
-function llamaHeaders(settings: Settings): HeadersInit {
+/** Static hosts (npx serve, dotnet serve) have no /api proxy. Once we see HTML/304, skip it. */
+let proxyDead = false;
+
+export function proxyIsDead() {
+  return proxyDead;
+}
+
+const STATIC_HINT =
+  "This page is on a static host (serve / dist) with no /api proxy. Use `npm start` after `npm run build`, or `npm run dev`. Talking to llama-server directly as a fallback.";
+
+function llamaHeaders(settings: Settings, extra?: Record<string, string>): HeadersInit {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     Accept: "text/event-stream",
     "X-Llama-Upstream": settings.llamaUrl,
+    ...extra,
   };
   if (settings.apiKey) headers.Authorization = `Bearer ${settings.apiKey}`;
   return headers;
 }
 
+function upstream(settings: Settings) {
+  return settings.llamaUrl.replace(/\/$/, "") || "http://127.0.0.1:8080";
+}
+
+function isStaticHole(res: Response, bodyText?: string) {
+  if (res.status === 304) return true;
+  const ct = (res.headers.get("content-type") || "").toLowerCase();
+  if (ct.includes("text/html")) return true;
+  if (ct.includes("application/json") || ct.includes("text/event-stream")) return false;
+  const t = (bodyText || "").trimStart();
+  return t.startsWith("<!") || t.startsWith("<html");
+}
+
+async function readMaybeJson(res: Response): Promise<unknown | null> {
+  if (res.status === 304) {
+    proxyDead = true;
+    return null;
+  }
+  const text = await res.text();
+  if (isStaticHole(res, text)) {
+    proxyDead = true;
+    return null;
+  }
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    proxyDead = true;
+    return null;
+  }
+}
+
+async function fetchStatusDirect(settings: Settings): Promise<ServerStatus> {
+  const base = upstream(settings);
+  const headers: Record<string, string> = {};
+  if (settings.apiKey) headers.Authorization = `Bearer ${settings.apiKey}`;
+  const result: ServerStatus = {
+    ok: false,
+    upstream: base,
+    health: null,
+    models: [],
+    props: null,
+    error: null,
+    workspace: "",
+    via: "direct",
+    hint: STATIC_HINT,
+  };
+  try {
+    const ctrl = AbortSignal.timeout(2500);
+    const [healthRes, modelsRes, propsRes] = await Promise.allSettled([
+      fetch(base + "/health", { headers, signal: ctrl }),
+      fetch(base + "/v1/models", { headers, signal: ctrl }),
+      fetch(base + "/props", { headers, signal: ctrl }),
+    ]);
+    if (healthRes.status === "fulfilled" && healthRes.value.ok) {
+      result.health = await healthRes.value.json().catch(() => ({ status: "ok" }));
+      result.ok = true;
+    } else if (healthRes.status === "fulfilled") {
+      result.health = { status: healthRes.value.status };
+      result.error = `llama-server /health ${healthRes.value.status}`;
+    } else {
+      result.error = healthRes.reason instanceof Error ? healthRes.reason.message : String(healthRes.reason);
+    }
+    if (modelsRes.status === "fulfilled" && modelsRes.value.ok) {
+      const json = await modelsRes.value.json();
+      result.models = json.data || [];
+    }
+    if (propsRes.status === "fulfilled" && propsRes.value.ok) {
+      result.props = await propsRes.value.json();
+    }
+    if (!result.ok && /Failed to fetch|NetworkError|CORS/i.test(result.error || "")) {
+      result.error =
+        `Cannot reach ${base} from the browser (CORS or it is down). ` +
+        `Static serve has no proxy — run npm start after npm run build.`;
+      result.via = "none";
+    }
+  } catch (err) {
+    result.error = err instanceof Error ? err.message : String(err);
+    result.via = "none";
+  }
+  return result;
+}
+
 export async function fetchStatus(settings: Settings): Promise<ServerStatus> {
-  const res = await fetch("/api/status", { headers: llamaHeaders(settings) });
-  if (!res.ok) throw new Error(`status ${res.status}`);
-  return res.json();
+  if (!proxyDead) {
+    try {
+      const res = await fetch("/api/status", {
+        headers: llamaHeaders(settings),
+        cache: "no-store",
+      });
+      const json = (await readMaybeJson(res)) as ServerStatus | null;
+      if (json && typeof json === "object" && "upstream" in json) {
+        return { ...json, via: json.via || "proxy" };
+      }
+    } catch {
+      proxyDead = true;
+    }
+  }
+  return fetchStatusDirect(settings);
 }
 
 export async function fetchTree() {
+  if (proxyDead) {
+    return { root: "", children: [], missing: true };
+  }
   const res = await fetch("/api/workspace/tree");
-  if (!res.ok) throw new Error(`tree ${res.status}`);
-  return res.json() as Promise<{
+  const json = await readMaybeJson(res);
+  if (!json || typeof json !== "object") {
+    return { root: "", children: [], missing: true };
+  }
+  return json as {
     root: string;
     children: import("./types").FileNode[];
     missing?: boolean;
-  }>;
+  };
 }
 
 export async function fetchFile(path: string) {
+  if (proxyDead) throw new Error("workspace reads need npm start (static serve has no /api)");
   const res = await fetch(`/api/workspace/file?path=${encodeURIComponent(path)}`);
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(err.error || `file ${res.status}`);
+  const json = (await readMaybeJson(res)) as { error?: string; path?: string; content?: string; size?: number } | null;
+  if (!json || json.error || json.content === undefined) {
+    throw new Error(json?.error || "could not read file");
   }
-  return res.json() as Promise<{ path: string; content: string; size: number }>;
+  return json as { path: string; content: string; size: number };
 }
 
 function toPayload(
@@ -55,10 +168,7 @@ function toPayload(
     let content = m.content;
     if (m.role === "user" && m.attachments?.length) {
       const blocks = m.attachments
-        .map(
-          (a) =>
-            `### Context: ${a.path}\n\`\`\`\n${a.content}\n\`\`\``,
-        )
+        .map((a) => `### Context: ${a.path}\n\`\`\`\n${a.content}\n\`\`\``)
         .join("\n\n");
       content = `${content}\n\n${blocks}`;
     }
@@ -138,6 +248,40 @@ async function readSse(
   return { demo };
 }
 
+async function openChatStream(
+  url: string,
+  headers: HeadersInit,
+  payload: unknown,
+  signal: AbortSignal,
+): Promise<Response | "static" | null> {
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+      signal,
+    });
+    const ct = (res.headers.get("content-type") || "").toLowerCase();
+    if (res.status === 304 || ct.includes("text/html")) return "static";
+    if (res.ok && res.body && (ct.includes("event-stream") || ct.includes("json") || !ct)) {
+      return res;
+    }
+    if (!res.ok) {
+      const errText = await res.text().catch(() => res.statusText);
+      if (isStaticHole(res, errText)) return "static";
+      throw new Error(errText || `llama-server ${res.status}`);
+    }
+    return res.body ? res : null;
+  } catch (err) {
+    if (signal.aborted) throw err;
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    if (err instanceof Error && err.message && !/Failed to fetch|NetworkError|unreachable/i.test(err.message)) {
+      throw err;
+    }
+    return null;
+  }
+}
+
 export async function streamChat(
   messages: ChatMessage[],
   sampling: Sampling,
@@ -147,40 +291,48 @@ export async function streamChat(
   forceDemo = false,
 ): Promise<{ demo: boolean }> {
   const payload = toPayload(messages, sampling, settings);
+  const headers = llamaHeaders(settings);
 
-  if (!forceDemo) {
-    try {
-      const res = await fetch("/api/llama/v1/chat/completions", {
-        method: "POST",
-        headers: llamaHeaders(settings),
-        body: JSON.stringify(payload),
-        signal,
-      });
-      if (res.ok && res.body) {
-        return readSse(res, handlers, signal);
-      }
-      const errText = await res.text().catch(() => res.statusText);
-      if (res.status !== 502 && res.status !== 503 && res.status !== 0) {
-        throw new Error(errText || `llama-server ${res.status}`);
-      }
-    } catch (err) {
-      if (signal.aborted) throw err;
-      if (err instanceof DOMException && err.name === "AbortError") throw err;
-      if (err instanceof Error && !/unreachable|Failed to fetch|502|network/i.test(err.message)) {
-        throw err;
-      }
+  if (!forceDemo && !proxyDead) {
+    const proxied = await openChatStream(
+      "/api/llama/v1/chat/completions",
+      headers,
+      payload,
+      signal,
+    );
+    if (proxied === "static") {
+      proxyDead = true;
+    } else if (proxied) {
+      return readSse(proxied, handlers, signal);
     }
   }
 
-  const demoRes = await fetch("/api/demo/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    signal,
-  });
-  if (!demoRes.ok) throw new Error("demo stream failed");
-  await readSse(demoRes, handlers, signal);
-  return { demo: true };
+  if (!forceDemo) {
+    const direct = await openChatStream(
+      `${upstream(settings)}/v1/chat/completions`,
+      llamaHeaders(settings, { Accept: "text/event-stream" }),
+      payload,
+      signal,
+    );
+    if (direct && direct !== "static") {
+      return readSse(direct, handlers, signal);
+    }
+  }
+
+  if (!proxyDead) {
+    const demoRes = await openChatStream("/api/demo/chat", { "Content-Type": "application/json" }, payload, signal);
+    if (demoRes && demoRes !== "static") {
+      await readSse(demoRes, handlers, signal);
+      return { demo: true };
+    }
+    if (demoRes === "static") proxyDead = true;
+  }
+
+  throw new Error(
+    proxyDead
+      ? `No Q38 proxy on this host, and llama-server at ${upstream(settings)} did not stream. After npm run build use npm start (not npx serve / dotnet serve). If you stay on a static host, enable CORS on llama-server and check Setup → URL.`
+      : `llama-server unreachable at ${upstream(settings)}`,
+  );
 }
 
 export function guessLang(path: string): string {

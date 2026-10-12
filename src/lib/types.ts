@@ -95,6 +95,8 @@ export type ServerStatus = {
   props: Record<string, unknown> | null;
   error: string | null;
   workspace: string;
+  via?: "proxy" | "direct" | "none";
+  hint?: string;
 };
 
 export const DEFAULT_SAMPLING: Sampling = {

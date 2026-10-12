@@ -227,6 +227,8 @@ export function Inspector({
           <dl className="kv">
             <dt>upstream</dt>
             <dd>{status?.upstream ?? "—"}</dd>
+            <dt>via</dt>
+            <dd>{status?.via || "—"}</dd>
             <dt>health</dt>
             <dd>{status?.ok ? "ok" : status?.error || "offline"}</dd>
             <dt>model</dt>
