@@ -1,0 +1,30 @@
+{
+  "name": "q38",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Coder workbench for DavidAU Qwen3.8-27B Turbo-Brilliance NEO MAX MTP via llama-server",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 5173",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --host 0.0.0.0 --port 5173",
+    "start": "node server/prod.mjs",
+    "serve": "node server/prod.mjs"
+  },
+  "dependencies": {
+    "@fontsource/ibm-plex-mono": "^5.3.0",
+    "@fontsource/ibm-plex-sans": "^5.3.0",
+    "@fontsource/syne": "^5.3.0",
+    "highlight.js": "^11.12.0",
+    "katex": "^0.19.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4"
+  }
+}
