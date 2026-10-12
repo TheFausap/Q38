@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { extForLang } from "../lib/api";
 import { escapeHtml, highlight } from "../lib/highlight";
+import { renderKatex, splitMath } from "../lib/math";
 
 type Block =
   | { type: "code"; lang: string; code: string; closed: boolean }
@@ -120,6 +121,22 @@ function renderText(text: string): string {
   return html.join("\n");
 }
 
+function renderTextWithMath(text: string): string {
+  const pieces = splitMath(text);
+  const slots: string[] = [];
+  const masked = pieces
+    .map((p, i) => {
+      if (p.type !== "math") return p.text;
+      slots[i] = renderKatex(p.tex, p.display, p.closed);
+      return p.display ? `\n\n@@MATH${i}@@\n\n` : `@@MATH${i}@@`;
+    })
+    .join("");
+  let html = renderText(masked);
+  html = html.replace(/<p>\s*@@MATH(\d+)@@\s*<\/p>/g, (_, n) => slots[Number(n)] || "");
+  html = html.replace(/@@MATH(\d+)@@/g, (_, n) => slots[Number(n)] || "");
+  return html;
+}
+
 function CodeBlock({ lang, code, closed }: { lang: string; code: string; closed: boolean }) {
   const [copied, setCopied] = useState(false);
   const html = useMemo(() => (closed ? highlight(code, lang || undefined) : escapeHtml(code)), [code, lang, closed]);
@@ -168,7 +185,7 @@ export function MarkdownView({ text }: { text: string }) {
         b.type === "code" ? (
           <CodeBlock key={i} lang={b.lang} code={b.code} closed={b.closed} />
         ) : (
-          <div key={i} dangerouslySetInnerHTML={{ __html: renderText(b.text) }} />
+          <div key={i} dangerouslySetInnerHTML={{ __html: renderTextWithMath(b.text) }} />
         ),
       )}
     </div>

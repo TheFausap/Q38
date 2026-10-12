@@ -13,6 +13,7 @@ The UI is built around Turbo Brilliance — 27 reasoning constructs, matching in
 - Native `reasoning_effort` (`xhigh` / medium / low / none) plus `enable_thinking`
 - Workspace file tree: pin files into the turn as fenced context (read-only)
 - Session history, regen, stop, syntax-highlighted code with copy/save
+- KaTeX for LaTeX: `$$...$$`, `$...$`, `\[...\]`, `\(...\)`, and `align`/`equation` environments
 - Same-origin proxy so the browser never talks to `localhost` and CORS is not your problem
 - Offline demo stream if llama-server is down, so the workbench still exercises
 

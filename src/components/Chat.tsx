@@ -192,7 +192,9 @@ function MessageView({ message, live }: { message: ChatMessage; live: boolean })
     return (
       <article className="msg user">
         <div className="msg-kicker">you {message.modeTag ? `· ${message.modeTag}` : ""}</div>
-        <div className="msg-body whitespace">{message.content}</div>
+        <div className="msg-body">
+          <MarkdownView text={message.content} />
+        </div>
         {message.attachments && message.attachments.length > 0 && (
           <div className="chips static">
             {message.attachments.map((a) => (
@@ -237,7 +239,11 @@ function Think({ text, live }: { text: string; live: boolean }) {
         <span>thinking</span>
         <span className="muted tiny">{text.length} chars {live ? "· live" : ""}</span>
       </button>
-      {open && <div className="think-body">{text}</div>}
+      {open && (
+        <div className="think-body">
+          <MarkdownView text={text} />
+        </div>
+      )}
     </div>
   );
 }

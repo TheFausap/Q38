@@ -294,12 +294,33 @@ button { cursor: pointer; }
   padding: 0 12px 12px;
   color: #cbb994;
   font-size: 12.5px;
-  white-space: pre-wrap;
-  font-family: var(--mono);
   line-height: 1.55;
 }
+.think-body .md { color: #cbb994; }
+.think-body .md p { font-family: var(--mono); white-space: pre-wrap; }
+.think-body .math-display { background: rgba(0, 0, 0, 0.2); }
 
 .md p { margin: 0 0 10px; }
+.md .math-display {
+  margin: 14px 0 18px;
+  padding: 14px 18px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: #100e0c;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  text-align: center;
+}
+.md .katex { font-size: 1.12em; color: var(--ink); }
+.md .katex-display { margin: 0; }
+.md .math-pending {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--think);
+  white-space: pre-wrap;
+}
+.md .katex-error { color: var(--bad); font-family: var(--mono); font-size: 12.5px; }
+.msg.user .md p { color: var(--user); }
 .md h1, .md h2, .md h3 {
   font-family: var(--display);
   margin: 18px 0 8px;
