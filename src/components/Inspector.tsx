@@ -7,6 +7,7 @@ import {
   type ContextUsage,
 } from "../lib/context";
 import { GROUPS, familyLabel, modeById, MODES, reasonTag } from "../lib/modes";
+import { formatClock, formatRate, type JobTick, type PaceStats } from "../lib/pacing";
 import type { Compaction, ModeFamily, Sampling, ServerStatus, Settings } from "../lib/types";
 
 export type InspectorTab = "construct" | "sample" | "context" | "server";
@@ -35,6 +36,8 @@ export function Inspector({
   onUnfold,
   folding,
   streaming,
+  pace,
+  tick,
 }: {
   tab: InspectorTab;
   onTab: (t: InspectorTab) => void;
@@ -57,6 +60,8 @@ export function Inspector({
   onUnfold: (index: number) => void;
   folding: boolean;
   streaming: boolean;
+  pace: PaceStats;
+  tick: JobTick | null;
 }) {
   const [q, setQ] = useState("");
   const mode = modeById(modeId);
@@ -483,6 +488,66 @@ export function Inspector({
             <dt>workspace</dt>
             <dd className="break">{status?.workspace ?? "—"}</dd>
           </dl>
+          <div className="group-label">Machine pacing</div>
+          <p className="hint">
+            The console reads what llama-server actually reports: <code>503 Loading model</code> while
+            the weights page back in, <code>prompt_progress</code> while the prompt is read, and the
+            decode rate from <code>timings</code>. Everything else is the job log dressing.
+          </p>
+          <dl className="kv tight">
+            <dt>warm baseline</dt>
+            <dd>{pace.baseline ? `${formatRate(pace.baseline)} tok/s` : "not measured yet"}</dd>
+            <dt>last round</dt>
+            <dd>
+              {pace.lastRate ? `${formatRate(pace.lastRate)} tok/s` : "—"}
+              {pace.lastTtfMs != null ? ` · first token ${formatClock(pace.lastTtfMs)}` : ""}
+            </dd>
+            <dt>jobs run</dt>
+            <dd>
+              {pace.jobs}
+              {pace.pagedJobs > 0 ? ` · paged on ${pace.pagedJobs}` : ""}
+            </dd>
+            {tick && (
+              <>
+                <dt>this job</dt>
+                <dd className="break">
+                  {tick.phase} · {tick.why}
+                </dd>
+              </>
+            )}
+          </dl>
+          <label className="tiny-check block">
+            <input
+              type="checkbox"
+              checked={settings.retroFeedback}
+              onChange={(e) => setSetting("retroFeedback", e.target.checked)}
+            />
+            punched-card job console while reading
+          </label>
+          <Slider
+            label="cold start after"
+            min={15}
+            max={600}
+            step={15}
+            value={settings.coldStartSeconds}
+            onChange={(v) => setSetting("coldStartSeconds", v)}
+            suffix="s idle"
+          />
+          <Slider
+            label="paging below"
+            min={0.1}
+            max={0.9}
+            step={0.05}
+            value={settings.pagingFactor}
+            onChange={(v) => setSetting("pagingFactor", v)}
+            suffix="× baseline"
+          />
+          <p className="hint">
+            Idle longer than the cold-start mark and the console says so up front: the first pass
+            after a swap is the slow one. Below the paging factor the job keeps running but the
+            console switches to the drum, because the weights are moving again.
+          </p>
+
           <pre className="cmd">
             {`llama-server \\\n  -m Qwen3.8-27B-Turbo-Brilliance-50X-RI-NEO-MAX-MTP-Q6_K.gguf \\\n  --alias q38-max --host 0.0.0.0 --port 8080 \\\n  -c 65536 -ngl 99 -fa on --jinja \\\n  --reasoning-format deepseek \\\n  --temp 0.7 --top-k 64 --min-p 0.05 --top-p 0.95 \\\n  --repeat-penalty 1.0 \\\n  --spec-type draft-mtp --spec-draft-n-max 3`}
           </pre>

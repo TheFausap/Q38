@@ -1,6 +1,8 @@
 import { useMemo, useState, useEffect, useRef } from "react";
 import { formatPct, formatTokens, compactionNetSavings, type ContextUsage } from "../lib/context";
 import { familyLabel, modeById, reasonTag } from "../lib/modes";
+import { isBusyPhase } from "../lib/pacing";
+import { JobConsole, type PacingView } from "./Punchcard";
 import { fenceState } from "../lib/summarize";
 import type { Attachment, ChatMessage, Compaction, ModeFamily, Session } from "../lib/types";
 import { MarkdownView } from "./MarkdownView";
@@ -25,6 +27,9 @@ export function Chat({
   compactAt,
   autoCompact,
   demoNotice,
+  pacing,
+  onCancelJob,
+  retro,
 }: {
   session: Session;
   family: ModeFamily;
@@ -45,6 +50,9 @@ export function Chat({
   compactAt: number;
   autoCompact: boolean;
   demoNotice: boolean;
+  pacing: PacingView | null;
+  onCancelJob: () => void;
+  retro: boolean;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const area = useRef<HTMLTextAreaElement>(null);
@@ -133,6 +141,14 @@ export function Chat({
           const hidden = foldIndex >= 0 && i <= foldIndex;
           const card = active && i === foldIndex + 1;
           if (hidden && !card) return null;
+          // while the job is still being read (or the model is being paged back
+          // in) the pending reply is a job console rather than a bare caret
+          const jobbed =
+            !!pacing &&
+            streamingId === m.id &&
+            !m.content &&
+            !m.reasoning &&
+            (isBusyPhase(pacing.phase) || pacing.phase === "paging");
           return (
             <div key={m.id}>
               {card && active && (
@@ -143,7 +159,21 @@ export function Chat({
                   disabled={!!streamingId}
                 />
               )}
-              {hidden ? null : (
+              {hidden ? null : jobbed && pacing ? (
+                retro ? (
+                  <JobConsole view={pacing} onCancel={onCancelJob} />
+                ) : (
+                  <div className="job-minimal">
+                    <span className="job-pip">
+                      <i />
+                      working · {Math.round(pacing.elapsedMs / 1000)}s
+                    </span>
+                    <button type="button" className="icon-btn" onClick={onCancelJob}>
+                      cancel
+                    </button>
+                  </div>
+                )
+              ) : (
                 <MessageView
                   message={m}
                   live={streamingId === m.id}
@@ -158,6 +188,7 @@ export function Chat({
       </div>
 
       <div className="composer">
+        {pacing && retro && pacing.phase === "paging" && <JobConsole view={pacing} compact />}
         {attachments.length > 0 && (
           <div className="chips">
             {attachments.map((a) => (
@@ -190,7 +221,11 @@ export function Chat({
         <div className="composer-bar">
           <span className={`muted tiny ${hot ? "hot-text" : ""}`}>
             ⌘↵ send · esc stop · {folding ? "folding context…" : `ctx ${formatPct(usage.pct)}`}
-            {autoCompact ? ` · auto-fold at ${formatPct(compactAt)}` : " · auto-fold off"}
+            {pacing && isBusyPhase(pacing.phase)
+              ? " · job in flight, the console will keep you posted"
+              : autoCompact
+                ? ` · auto-fold at ${formatPct(compactAt)}`
+                : " · auto-fold off"}
           </span>
           <span className="grow" />
           {lastAssistant && !streamingId && (

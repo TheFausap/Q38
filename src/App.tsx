@@ -27,6 +27,16 @@ import {
 } from "./lib/context";
 import { modeById, reasonTag } from "./lib/modes";
 import {
+  DEFAULT_PACING,
+  loadPaceStats,
+  planJobTick,
+  savePaceStats,
+  updateBaseline,
+  type JobTick,
+  type PaceStats,
+} from "./lib/pacing";
+import { JobPip, type PacingView } from "./components/Punchcard";
+import {
   foldPaysOff,
   foldedPromptCost,
   headPromptCost,
@@ -54,6 +64,7 @@ import type {
   FileNode,
   FinishInfo,
   ModeFamily,
+  PromptProgress,
   Sampling,
   ServerStatus,
   Session,
@@ -76,6 +87,30 @@ function blankSession(modeId: string, family: ModeFamily): Session {
 }
 
 type Round = { body: string; reasoning: string; finish: FinishInfo };
+
+/**
+ * A turn in flight, as the console sees it: when it was sent, what the server
+ * has reported since, and how the machine is behaving.
+ */
+type Job = {
+  no: number;
+  startedAt: number;
+  idleBefore: number;
+  cold: boolean;
+  loadingAt: number | null;
+  queuedAckAt: number | null;
+  progress: PromptProgress | null;
+  firstTokenAt: number | null;
+  lastTokenAt: number | null;
+  /** rolling decode samples for the live rate */
+  samples: { at: number; tokens: number }[];
+  tokens: number;
+  chars: number;
+  /** decode rate as last measured from the stream */
+  rate: number | null;
+  /** the server's own predicted_per_second for the round */
+  finalRate: number | null;
+};
 
 /** Result of trying to fold the older half of a transcript. */
 type FoldOutcome =
@@ -114,13 +149,39 @@ export function App() {
   const [foldNotice, setFoldNotice] = useState<string | null>(null);
   const [folding, setFolding] = useState(false);
   const [exactTokens, setExactTokens] = useState<number | null>(null);
+  const [job, setJob] = useState<Job | null>(null);
+  const [tick, setTick] = useState(0);
+  const [pace, setPace] = useState<PaceStats>(() => loadPaceStats());
+  const [lastTick, setLastTick] = useState<JobTick | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const sendingRef = useRef(false);
   const sessionsRef = useRef(sessions);
+  const jobRef = useRef<Job | null>(null);
+  const lastActivityRef = useRef<number>(Date.now());
+  const jobNoRef = useRef<number>(0);
+  const pagedRef = useRef(false);
 
   useEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
+
+  useEffect(() => {
+    jobRef.current = job;
+  }, [job]);
+
+  useEffect(() => {
+    savePaceStats(pace);
+  }, [pace]);
+
+  /* While a turn is in flight, tick the console four times a second: the clock,
+     the stall detector and the sliding-window rate all move without a token. */
+  useEffect(() => {
+    if (!job) return;
+    const id = window.setInterval(() => setTick((t) => t + 1), 250);
+    return () => window.clearInterval(id);
+  }, [job]);
+
+  const serverLoading = status?.loading === true;
 
   const session = useMemo(
     () => sessions.find((s) => s.id === activeId) || sessions[0],
@@ -172,6 +233,154 @@ export function App() {
     const id = window.setInterval(() => void refreshStatus(), 8000);
     return () => window.clearInterval(id);
   }, [refreshTree, refreshStatus]);
+
+  /* ---------------------------------------------------- job console state */
+
+  const jobInput = useCallback(
+    (j: Job | null) => {
+      if (!j) return null;
+      return {
+        startedAt: j.startedAt,
+        firstTokenAt: j.firstTokenAt,
+        lastTokenAt: j.lastTokenAt,
+        tokens: j.tokens,
+        samples: j.samples,
+        progress: j.progress,
+        // the server only says "loading" while it has not started reading yet
+        serverLoading: serverLoading && j.progress == null && j.firstTokenAt == null,
+      };
+    },
+    [serverLoading],
+  );
+
+  /** The console's verdict on the job in flight, recomputed on every tick. */
+  const pacingView: PacingView | null = useMemo(() => {
+    const j = job;
+    const input = jobInput(j);
+    if (!j || !input) return null;
+    const now = Date.now();
+    const t = planJobTick(input, now, {
+      // always the *warm* baseline: comparing a round against its own rate
+      // would call every round healthy, however slow the machine had gone
+      baseline: pace.baseline,
+      pagingFactor: settings.pagingFactor,
+      stallSeconds: DEFAULT_PACING.stallSeconds,
+      queuedGraceSeconds: DEFAULT_PACING.queuedGraceSeconds,
+    });
+    return {
+      phase: t.phase,
+      why: t.why,
+      jobNo: j.no,
+      startedAt: j.startedAt,
+      elapsedMs: t.elapsedMs,
+      stalledMs: t.stalledMs,
+      progress: j.progress,
+      progressSeen: j.progress != null,
+      ttfMs: t.ttfMs,
+      rate: t.rate,
+      baseline: pace.baseline,
+      tokens: t.tokens,
+      cold: j.cold,
+      loadingMs: j.loadingAt != null ? now - j.loadingAt : null,
+      queuedMs: j.queuedAckAt ?? 0,
+    };
+    // `tick` is the clock that moves this view forward between tokens
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job, tick, pace.baseline, settings.pagingFactor, jobInput]);
+
+  /* One source of truth: the same verdict feeds the console, the top-bar pip
+     and the pacing stats. The ticker latches "this job paged" for the session. */
+  useEffect(() => {
+    if (!pacingView) {
+      setLastTick(null);
+      return;
+    }
+    if (pacingView.phase === "paging") pagedRef.current = true;
+    setLastTick({
+      phase: pacingView.phase,
+      why: pacingView.why,
+      elapsedMs: pacingView.elapsedMs,
+      stalledMs: pacingView.stalledMs,
+      rate: pacingView.rate,
+      ttfMs: pacingView.ttfMs,
+      tokens: pacingView.tokens,
+    });
+  }, [pacingView]);
+
+  /** Start of every turn: stamp the job so the console has something to say. */
+  const beginJob = useCallback(() => {
+    const idleBefore = Date.now() - lastActivityRef.current;
+    jobNoRef.current += 1;
+    pagedRef.current = false;
+    const next: Job = {
+      no: jobNoRef.current,
+      startedAt: Date.now(),
+      idleBefore,
+      cold: idleBefore > settings.coldStartSeconds * 1000 || serverLoading,
+      loadingAt: serverLoading ? Date.now() : null,
+      queuedAckAt: null,
+      progress: null,
+      firstTokenAt: null,
+      lastTokenAt: null,
+      samples: [],
+      tokens: 0,
+      chars: 0,
+      rate: null,
+      finalRate: null,
+    };
+    jobRef.current = next;
+    setJob(next);
+    return next;
+  }, [settings.coldStartSeconds, serverLoading]);
+
+  /** Fold a stream event into the job without re-rendering per character. */
+  const patchJob = useCallback((fn: (j: Job) => Job) => {
+    const current = jobRef.current;
+    if (!current) return;
+    const next = fn(current);
+    jobRef.current = next;
+    setJob(next);
+  }, []);
+
+  const endJob = useCallback(() => {
+    const j = jobRef.current;
+    lastActivityRef.current = Date.now();
+    if (j) {
+      const paged = pagedRef.current;
+      const ttfMs = j.firstTokenAt != null ? Math.max(0, j.firstTokenAt - j.startedAt) : null;
+      setPace((prev) => ({
+        ...prev,
+        // only a round that actually decoded teaches us anything about speed
+        baseline: updateBaseline(prev.baseline, j.finalRate ?? j.rate ?? 0),
+        lastTtfMs: ttfMs,
+        lastRate: j.finalRate ?? j.rate,
+        jobs: prev.jobs + 1,
+        pagedJobs: prev.pagedJobs + (paged ? 1 : 0),
+      }));
+    }
+    setJob(null);
+    setTick(0);
+  }, []);
+
+  const noteToken = useCallback(
+    (chars: number) => {
+      patchJob((j) => {
+        const now = Date.now();
+        const tokens = Math.max(j.tokens, Math.round((j.chars + chars) / 3.6));
+        const samples = [...j.samples, { at: now, tokens }].filter((x) => now - x.at < 20_000);
+        const recent = samples.length > 24 ? samples.slice(-24) : samples;
+        return {
+          ...j,
+          chars: j.chars + chars,
+          tokens,
+          samples: recent,
+          firstTokenAt: j.firstTokenAt ?? now,
+          lastTokenAt: now,
+        };
+      });
+    },
+    [patchJob],
+  );
 
   /* ------------------------------------------------------------- sessions */
 
@@ -467,6 +676,7 @@ export function App() {
             acc.body = s.body;
             acc.reasoning = s.reasoning;
             patchMessage(args.sessionId, args.messageId, (m) => ({ ...m, reasoning: s.reasoning }));
+            noteToken(c.length);
           },
           onContent: (c) => {
             freshBody += c;
@@ -474,10 +684,39 @@ export function App() {
             acc.body = s.body;
             acc.reasoning = s.reasoning;
             patchMessage(args.sessionId, args.messageId, (m) => ({ ...m, content: s.body }));
+            noteToken(c.length);
           },
           onTimings: (t, extra) => {
             patchMessage(args.sessionId, args.messageId, (m) => ({ ...m, timings: t, demo: extra?.demo }));
             if (extra?.demo) setDemoNotice(true);
+            if (t.predicted_per_second && t.predicted_per_second > 0) {
+              patchJob((j) => {
+                const rate = t.predicted_per_second as number;
+                return {
+                  ...j,
+                  finalRate: rate,
+                  rate,
+                  tokens: t.predicted_n ?? j.tokens,
+                };
+              });
+            }
+            if (t.prompt_n) {
+              patchJob((j) => ({
+                ...j,
+                progress: {
+                  total: t.prompt_n as number,
+                  cache: t.cache_n ?? 0,
+                  processed: t.prompt_n as number,
+                  time_ms: t.prompt_ms ?? 0,
+                },
+              }));
+            }
+          },
+          onProgress: (p) => {
+            patchJob((j) => ({ ...j, progress: p, queuedAckAt: j.queuedAckAt ?? Date.now() }));
+          },
+          onServerLoading: () => {
+            patchJob((j) => ({ ...j, loadingAt: j.loadingAt ?? Date.now() }));
           },
           onFinish: (f) => {
             finish = f;
@@ -487,6 +726,9 @@ export function App() {
         { systemExtra: args.systemExtra, continueFinal, directive },
       );
       if (result.demo) setDemoNotice(true);
+      if (result.queuedMs > 0) {
+        patchJob((j) => ({ ...j, idleBefore: j.idleBefore + result.queuedMs }));
+      }
       return result.finish;
     };
 
@@ -537,18 +779,25 @@ export function App() {
       ? [...args.wireBefore, assistantMessage(acc.body)]
       : args.wireBefore;
 
-    let round = await runRound({
-      sessionId: args.sessionId,
-      messageId: args.messageId,
-      wire: firstWire,
-      systemExtra: args.systemExtra,
-      ctrl: args.ctrl,
-      acc,
-      start: { body: acc.body, reasoning: acc.reasoning },
-      continueFinal: args.first.continueFinal,
-      directive: args.first.directive,
-      fallbackDirective: args.first.fallbackDirective,
-    });
+    beginJob();
+    let round: Round;
+    try {
+      round = await runRound({
+        sessionId: args.sessionId,
+        messageId: args.messageId,
+        wire: firstWire,
+        systemExtra: args.systemExtra,
+        ctrl: args.ctrl,
+        acc,
+        start: { body: acc.body, reasoning: acc.reasoning },
+        continueFinal: args.first.continueFinal,
+        directive: args.first.directive,
+        fallbackDirective: args.first.fallbackDirective,
+      });
+    } catch (err) {
+      endJob();
+      throw err;
+    }
 
     let continues = 0;
     for (;;) {
@@ -576,6 +825,7 @@ export function App() {
       });
       patchMessage(args.sessionId, args.messageId, (m) => ({ ...m, continues }));
     }
+    endJob();
     return round;
   };
 
@@ -865,6 +1115,9 @@ export function App() {
           <span>{folding ? "folding" : formatPct(usage.pct)}</span>
           <i />
         </button>
+        {pacingView && pacingView.phase !== "idle" && (
+          <JobPip phase={pacingView.phase} elapsedMs={pacingView.elapsedMs} />
+        )}
         <StatusPill status={status} />
         <button type="button" className="icon-btn" onClick={() => newSession()}>
           new chat
@@ -886,7 +1139,18 @@ export function App() {
           </span>
         </div>
       )}
-      {status?.via === "none" && status?.error && (
+      {status?.loading && (
+        <div className="banner warming">
+          <span className="pager-drum" aria-hidden="true">
+            <i />
+          </span>
+          <span>
+            llama-server is loading the model into memory. Send whenever you like — the job is
+            queued and the card reader shows it being read the moment the weights are in.
+          </span>
+        </div>
+      )}
+      {status?.via === "none" && status?.error && !status.loading && (
         <div className="banner warn">
           <span>{status.error}</span>
         </div>
@@ -959,6 +1223,9 @@ export function App() {
             setDraft(t);
           }}
           onContinue={(id) => void continueMessage(id)}
+          pacing={pacingView}
+          onCancelJob={stop}
+          retro={settings.retroFeedback}
           onFold={() => void foldNow()}
           onUnfold={unfold}
           folding={folding}
@@ -990,6 +1257,8 @@ export function App() {
             onUnfold={unfold}
             folding={folding}
             streaming={Boolean(streamingId)}
+            pace={pace}
+            tick={lastTick}
           />
         )}
       </div>
@@ -1008,13 +1277,16 @@ export function App() {
 
 function StatusPill({ status }: { status: ServerStatus | null }) {
   const ok = !!status?.ok;
+  const warming = !ok && status?.loading === true;
   const label = ok
     ? status?.via === "direct"
       ? "llama-server · direct"
       : "llama-server"
-    : "offline";
+    : warming
+      ? "warming up"
+      : "offline";
   return (
-    <div className={`status ${ok ? "ok" : "down"}`}>
+    <div className={`status ${ok ? "ok" : warming ? "warm" : "down"}`}>
       <i />
       {label}
     </div>
