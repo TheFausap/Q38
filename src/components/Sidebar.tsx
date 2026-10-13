@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { Attachment, FileNode, Session } from "../lib/types";
 
 function FileRow({
@@ -72,7 +72,7 @@ export function Sidebar({
   attachments,
   onToggleFile,
   onPreviewFile,
-  dragging,
+  onFiles,
 }: {
   sessions: Session[];
   activeId: string;
@@ -83,10 +83,12 @@ export function Sidebar({
   attachments: Attachment[];
   onToggleFile: (node: FileNode) => void;
   onPreviewFile: (node: FileNode) => void;
-  /** a file is being dragged over the window */
-  dragging: boolean;
+  /** same path a drop takes: save into the workspace, then pin */
+  onFiles: (files: FileList | File[]) => void;
 }) {
   const [q, setQ] = useState("");
+  const [over, setOver] = useState(false);
+  const pickRef = useRef<HTMLInputElement>(null);
   const attached = useMemo(() => new Set(attachments.map((a) => a.path)), [attachments]);
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase();
@@ -142,8 +144,32 @@ export function Sidebar({
           <span>Workspace</span>
           <span className="muted tiny">{attached.size} pinned</span>
         </header>
-        <div className={`dropzone ${dragging ? "over" : ""}`}>
-          Drop files to pin as context
+        <div
+          className={`dropzone ${over ? "over" : ""}`}
+          onDragEnter={() => setOver(true)}
+          onDragOver={(e) => {
+            // the box is a valid target in its own right, whatever is dragged
+            e.preventDefault();
+            setOver(true);
+          }}
+          onDragLeave={() => setOver(false)}
+          onDrop={() => setOver(false)}
+        >
+          <span>Drop files to pin as context</span>
+          <button type="button" className="link-btn" onClick={() => pickRef.current?.click()}>
+            or browse…
+          </button>
+          <input
+            ref={pickRef}
+            type="file"
+            multiple
+            hidden
+            onChange={(e) => {
+              const files = e.target.files;
+              if (files && files.length) onFiles(files);
+              e.target.value = "";
+            }}
+          />
         </div>
         <div className="tree">
           {tree.length === 0 && (

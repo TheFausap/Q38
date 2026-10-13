@@ -206,6 +206,17 @@ button { cursor: pointer; }
 }
 .dropzone.over { border-color: var(--brass); color: var(--brass); }
 
+.dropzone .link-btn {
+  background: none;
+  border: 0;
+  padding: 0 0 0 6px;
+  color: var(--brass);
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.dropzone .link-btn:hover { color: var(--brass-2); }
+
 /* While a file is in the air the whole window is the target, and it says so. */
 .drop-veil {
   position: fixed;

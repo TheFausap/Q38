@@ -527,18 +527,23 @@ export function App() {
           continue;
         }
         let target = f.name;
+        let stored = false;
         try {
           const saved = await uploadWorkspaceFile(f.name, content);
           target = saved.path;
+          stored = true;
           notes.push(`${saved.path} → saved to ./workspace${saved.renamed ? " (name was taken)" : ""}`);
         } catch (err) {
-          notes.push(`${f.name} — ${err instanceof Error ? err.message : "could not be saved"}`);
-          failed += 1;
+          // the workspace write needs the middleware: without it, pin anyway
+          notes.push(
+            `${f.name} — not saved (${err instanceof Error ? err.message : "workspace unreachable"})`,
+          );
         }
         if (f.size > PIN_MAX_BYTES) {
           notes.push(`${target} is ${humanBytes(f.size)} — too big to pin as context`);
         } else {
           next.push({ path: target, content, source: "upload" });
+          if (!stored) notes.push(`${target} is pinned to this turn only`);
         }
       }
 
@@ -563,33 +568,67 @@ export function App() {
 
   /* A drop anywhere in the window is ours: the dashed box is a hint, not the
      only target, and the browser must never get the file (it would navigate
-     away from the workbench, which is what "nothing happens" looked like). */
+     away from the workbench, which is what "nothing happens" looked like).
+     `dragenter` has to be cancelled as well as `dragover` — a browser will not
+     fire `drop` for a target that only cancels one of them. */
   useEffect(() => {
-    const carriesFiles = (e: DragEvent) => Boolean(e.dataTransfer?.types?.includes("Files"));
+    /**
+     * Is this drag carrying files? Browsers are not consistent about it, and a
+     * drag that crosses an origin boundary (the workbench is framed) may report
+     * no types at all until the drop. An unidentified drag is therefore treated
+     * as a possible file drag: refusing it would mean the browser never offers
+     * the drop and the file goes nowhere. Anything that identifies itself as
+     * something else — dragging text around the page, say — is left alone.
+     */
+    const isFileDrag = (e: DragEvent) => {
+      const dt = e.dataTransfer;
+      if (!dt) return false;
+      if (dt.files && dt.files.length > 0) return true; // populated on drop
+      const types = Array.from(dt.types || []).map((t) => String(t).toLowerCase());
+      if (import.meta.env.DEV && types.length) {
+        console.debug("[q38] drag types:", types.join(", "));
+      }
+      if (types.length === 0) return true; // unknown provenance: do not refuse it
+      return types.some(
+        (t) => t === "files" || t === "application/x-moz-file" || t === "application/x-webkit-file",
+      );
+    };
+
+    const onDragEnter = (e: DragEvent) => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+      setDragging(true);
+    };
+    /* dragover fires continuously: cancel it so the pointer keeps showing a
+       copy cursor, and hold the hint up while it does */
     const onDragOver = (e: DragEvent) => {
-      if (!carriesFiles(e)) return;
+      if (!isFileDrag(e)) return;
       e.preventDefault();
       if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
       setDragging(true);
     };
     const onDragLeave = (e: DragEvent) => {
       // leaving the window, not just an element inside it
-      if (e.relatedTarget === null) setDragging(false);
+      if (!e.relatedTarget) setDragging(false);
     };
     const onDrop = (e: DragEvent) => {
-      if (!carriesFiles(e)) return;
+      const files = e.dataTransfer?.files;
+      // take the drop even if the drag never announced itself as files
+      if (!files || files.length === 0) return;
       e.preventDefault();
       setDragging(false);
-      const files = e.dataTransfer?.files;
-      if (files && files.length) void onFiles(files);
+      void onFiles(files);
     };
     const onDragEnd = () => setDragging(false);
 
+    window.addEventListener("dragenter", onDragEnter);
     window.addEventListener("dragover", onDragOver);
     window.addEventListener("dragleave", onDragLeave);
     window.addEventListener("drop", onDrop);
     window.addEventListener("dragend", onDragEnd);
     return () => {
+      window.removeEventListener("dragenter", onDragEnter);
       window.removeEventListener("dragover", onDragOver);
       window.removeEventListener("dragleave", onDragLeave);
       window.removeEventListener("drop", onDrop);
@@ -1318,7 +1357,7 @@ export function App() {
             attachments={attachments}
             onToggleFile={toggleFile}
             onPreviewFile={previewFile}
-            dragging={dragging}
+            onFiles={onFiles}
           />
         )}
         <Chat
