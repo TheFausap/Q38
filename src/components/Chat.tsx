@@ -195,9 +195,13 @@ export function Chat({
               <button
                 key={a.path}
                 type="button"
-                className="chip"
+                className={`chip ${a.unstored ? "unstored" : ""}`}
                 onClick={() => onDetach(a.path)}
-                title="Unpin"
+                title={
+                  a.unstored
+                    ? "Pinned to this turn only — it was not written into ./workspace (the API was unreachable)"
+                    : "Unpin"
+                }
               >
                 {a.path} <span>×</span>
               </button>

@@ -73,6 +73,7 @@ export function Sidebar({
   onToggleFile,
   onPreviewFile,
   onFiles,
+  treeError,
 }: {
   sessions: Session[];
   activeId: string;
@@ -85,6 +86,8 @@ export function Sidebar({
   onPreviewFile: (node: FileNode) => void;
   /** same path a drop takes: save into the workspace, then pin */
   onFiles: (files: FileList | File[]) => void;
+  /** why the tree could not be read, when it could not be */
+  treeError?: string | null;
 }) {
   const [q, setQ] = useState("");
   const [over, setOver] = useState(false);
@@ -172,9 +175,15 @@ export function Sidebar({
           />
         </div>
         <div className="tree">
-          {tree.length === 0 && (
-            <p className="muted pad">No files. Drop some, or add them to ./workspace.</p>
-          )}
+          {tree.length === 0 &&
+            (treeError ? (
+              <p className="muted pad warn-text">
+                Workspace unavailable — {treeError}. The tree you are looking at is stale, not
+                empty: nothing was lost.
+              </p>
+            ) : (
+              <p className="muted pad">No files. Drop some, or add them to ./workspace.</p>
+            ))}
           {tree.map((n) => (
             <FileRow
               key={n.path}
