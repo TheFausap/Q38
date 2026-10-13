@@ -8,6 +8,7 @@ import {
   countTokens,
   fetchFile,
   fetchStatus,
+  uploadWorkspaceFile,
   fetchTree,
   streamChat,
 } from "./lib/api";
@@ -88,6 +89,17 @@ function blankSession(modeId: string, family: ModeFamily): Session {
 
 type Round = { body: string; reasoning: string; finish: FinishInfo };
 
+/** Longest drop that may be written into ./workspace (mirrors server/api.mjs). */
+const DROP_MAX_BYTES = 8 * 1024 * 1024;
+/** Above this the file is saved but too big to pin as context (server read cap). */
+const PIN_MAX_BYTES = 800_000;
+
+function humanBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 /**
  * A turn in flight, as the console sees it: when it was sent, what the server
  * has reported since, and how the machine is behaving.
@@ -149,6 +161,8 @@ export function App() {
   const [foldNotice, setFoldNotice] = useState<string | null>(null);
   const [folding, setFolding] = useState(false);
   const [exactTokens, setExactTokens] = useState<number | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const [dropNotice, setDropNotice] = useState<string | null>(null);
   const [job, setJob] = useState<Job | null>(null);
   const [tick, setTick] = useState(0);
   const [pace, setPace] = useState<PaceStats>(() => loadPaceStats());
@@ -483,20 +497,105 @@ export function App() {
     }
   };
 
-  const onFiles = async (list: FileList | File[]) => {
-    const files = Array.from(list);
-    const next: Attachment[] = [];
-    for (const f of files) {
-      if (f.size > 800_000) continue;
-      const content = await f.text();
-      next.push({ path: f.name, content, source: "upload" });
-    }
-    setAttachments((cur) => {
-      const map = new Map(cur.map((a) => [a.path, a]));
-      for (const n of next) map.set(n.path, n);
-      return [...map.values()];
-    });
-  };
+  /**
+   * A drop does two things: the file is saved into ./workspace (which is what
+   * the tree right below the dropzone promises), and — when it is small enough
+   * to read as context — pinned to the next turn. Every file gets a line in
+   * the notice, including the ones that were refused, so a drop is never
+   * silent.
+   */
+  const onFiles = useCallback(
+    async (list: FileList | File[]) => {
+      const files = Array.from(list);
+      if (files.length === 0) return;
+      const next: Attachment[] = [];
+      const notes: string[] = [];
+      let failed = 0;
+
+      for (const f of files) {
+        if (f.size > DROP_MAX_BYTES) {
+          notes.push(`${f.name} — ${humanBytes(f.size)}, over the ${humanBytes(DROP_MAX_BYTES)} limit`);
+          failed += 1;
+          continue;
+        }
+        let content: string;
+        try {
+          content = await f.text();
+        } catch {
+          notes.push(`${f.name} — could not be read`);
+          failed += 1;
+          continue;
+        }
+        let target = f.name;
+        try {
+          const saved = await uploadWorkspaceFile(f.name, content);
+          target = saved.path;
+          notes.push(`${saved.path} → saved to ./workspace${saved.renamed ? " (name was taken)" : ""}`);
+        } catch (err) {
+          notes.push(`${f.name} — ${err instanceof Error ? err.message : "could not be saved"}`);
+          failed += 1;
+        }
+        if (f.size > PIN_MAX_BYTES) {
+          notes.push(`${target} is ${humanBytes(f.size)} — too big to pin as context`);
+        } else {
+          next.push({ path: target, content, source: "upload" });
+        }
+      }
+
+      if (next.length) {
+        setAttachments((cur) => {
+          const map = new Map(cur.map((a) => [a.path, a]));
+          for (const n of next) map.set(n.path, n);
+          return [...map.values()];
+        });
+      }
+      const pinned = next.length
+        ? `pinned ${next.length} file${next.length > 1 ? "s" : ""} as context`
+        : "";
+      setDropNotice(
+        [pinned, ...notes].filter(Boolean).join(" · ") ||
+          (failed ? "nothing could be taken from that drop" : ""),
+      );
+      void refreshTree();
+    },
+    [refreshTree],
+  );
+
+  /* A drop anywhere in the window is ours: the dashed box is a hint, not the
+     only target, and the browser must never get the file (it would navigate
+     away from the workbench, which is what "nothing happens" looked like). */
+  useEffect(() => {
+    const carriesFiles = (e: DragEvent) => Boolean(e.dataTransfer?.types?.includes("Files"));
+    const onDragOver = (e: DragEvent) => {
+      if (!carriesFiles(e)) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+      setDragging(true);
+    };
+    const onDragLeave = (e: DragEvent) => {
+      // leaving the window, not just an element inside it
+      if (e.relatedTarget === null) setDragging(false);
+    };
+    const onDrop = (e: DragEvent) => {
+      if (!carriesFiles(e)) return;
+      e.preventDefault();
+      setDragging(false);
+      const files = e.dataTransfer?.files;
+      if (files && files.length) void onFiles(files);
+    };
+    const onDragEnd = () => setDragging(false);
+
+    window.addEventListener("dragover", onDragOver);
+    window.addEventListener("dragleave", onDragLeave);
+    window.addEventListener("drop", onDrop);
+    window.addEventListener("dragend", onDragEnd);
+    return () => {
+      window.removeEventListener("dragover", onDragOver);
+      window.removeEventListener("dragleave", onDragLeave);
+      window.removeEventListener("drop", onDrop);
+      window.removeEventListener("dragend", onDragEnd);
+    };
+  }, [onFiles]);
 
   /* -------------------------------------------------------------- context */
 
@@ -1168,6 +1267,15 @@ export function App() {
         </div>
       )}
 
+      {dropNotice && (
+        <div className="banner note">
+          <span>{dropNotice}</span>
+          <button type="button" className="icon-btn" onClick={() => setDropNotice(null)}>
+            dismiss
+          </button>
+        </div>
+      )}
+
       {foldNotice && (
         <div className="banner fold">
           <span>{foldNotice}</span>
@@ -1188,6 +1296,11 @@ export function App() {
       )}
 
       <div className="workspace">
+        {dragging && (
+          <div className="drop-veil">
+            <span>Drop to save into ./workspace and pin as context</span>
+          </div>
+        )}
         {leftOpen && (
           <Sidebar
             sessions={sessions}
@@ -1205,7 +1318,7 @@ export function App() {
             attachments={attachments}
             onToggleFile={toggleFile}
             onPreviewFile={previewFile}
-            onFiles={onFiles}
+            dragging={dragging}
           />
         )}
         <Chat

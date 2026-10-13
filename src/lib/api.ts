@@ -211,6 +211,26 @@ export async function fetchTree() {
   };
 }
 
+/**
+ * Drop a file into ./workspace. The server keeps only the base name and never
+ * clobbers an existing file — a taken name comes back as `config-2.json`.
+ */
+export async function uploadWorkspaceFile(name: string, content: string) {
+  if (proxyDead) throw new Error("saving to the workspace needs npm run dev or npm start");
+  const res = await fetch("/api/workspace/upload", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: name, content }),
+  });
+  const json = (await readMaybeJson(res)) as
+    | { error?: string; path?: string; size?: number; renamed?: boolean }
+    | null;
+  if (!res.ok || !json || json.error || !json.path) {
+    throw new Error(json?.error || `could not save ${name}`);
+  }
+  return json as { path: string; size: number; renamed?: boolean };
+}
+
 export async function fetchFile(path: string) {
   if (proxyDead) throw new Error("workspace reads need npm start (static serve has no /api)");
   const res = await fetch(`/api/workspace/file?path=${encodeURIComponent(path)}`);

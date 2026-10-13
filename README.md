@@ -61,9 +61,18 @@ Vite binds `0.0.0.0:5173`. Long generations (slow GPU, big `xhigh` traces) are s
 | `/api/status` | `/health` + `/v1/models` + `/props` |
 | `/api/workspace/tree` | file tree for `WORKSPACE_DIR` (default `./workspace`) |
 | `/api/workspace/file` | read a text file for context pinning |
+| `/api/workspace/upload` | write a dropped file into `WORKSPACE_DIR` |
 | `/api/demo/chat` | SSE demo if the model is offline |
 
 Point **Setup → llama-server URL** at your server (default `http://127.0.0.1:8080`). The proxy reads `X-Llama-Upstream` per request.
+
+**Dropping a file.** Drop it anywhere in the window — the whole window is the target,
+not just the dashed box, and the file never reaches the browser (which would navigate
+away). Each drop does two things: the file is written into `WORKSPACE_DIR` so it appears
+in the tree, and — up to 800 KB, the same limit the context reader uses — it is pinned
+to the next turn. The banner afterwards names every file and what became of it; a name
+that is already taken comes back as `config-2.json` rather than overwriting the original.
+Files over 8 MB are refused with a reason, never silently dropped.
 
 ```bash
 npm run build

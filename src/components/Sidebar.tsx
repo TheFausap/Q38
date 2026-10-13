@@ -72,7 +72,7 @@ export function Sidebar({
   attachments,
   onToggleFile,
   onPreviewFile,
-  onFiles,
+  dragging,
 }: {
   sessions: Session[];
   activeId: string;
@@ -83,7 +83,8 @@ export function Sidebar({
   attachments: Attachment[];
   onToggleFile: (node: FileNode) => void;
   onPreviewFile: (node: FileNode) => void;
-  onFiles: (files: FileList | File[]) => void;
+  /** a file is being dragged over the window */
+  dragging: boolean;
 }) {
   const [q, setQ] = useState("");
   const attached = useMemo(() => new Set(attachments.map((a) => a.path)), [attachments]);
@@ -141,19 +142,7 @@ export function Sidebar({
           <span>Workspace</span>
           <span className="muted tiny">{attached.size} pinned</span>
         </header>
-        <div
-          className="dropzone"
-          onDragOver={(e) => {
-            e.preventDefault();
-            e.currentTarget.classList.add("over");
-          }}
-          onDragLeave={(e) => e.currentTarget.classList.remove("over")}
-          onDrop={(e) => {
-            e.preventDefault();
-            e.currentTarget.classList.remove("over");
-            if (e.dataTransfer.files.length) onFiles(e.dataTransfer.files);
-          }}
-        >
+        <div className={`dropzone ${dragging ? "over" : ""}`}>
           Drop files to pin as context
         </div>
         <div className="tree">
