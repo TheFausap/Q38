@@ -16,6 +16,20 @@ export type Timings = {
   cache_n?: number;
 };
 
+/**
+ * llama-server's prefill heartbeat, streamed when the request asks for it
+ * (`return_progress`). `processed` walks from `cache` up to `total`.
+ */
+export type PromptProgress = {
+  /** prompt tokens for this turn */
+  total: number;
+  /** tokens served from the prompt cache */
+  cache: number;
+  /** tokens read into the batch so far */
+  processed: number;
+  time_ms: number;
+};
+
 /** How a stream ended. llama.cpp reports `finish_reason` + `stop_type`. */
 export type FinishInfo = {
   /** "stop" | "length" | "tool_calls" | "" */
@@ -135,6 +149,12 @@ export type Settings = {
   maxContinues: number;
   /** assistant-prefill continuation, prompt directive, or prefill with fallback */
   continueMode: ContinueMode;
+  /** show the punched-card job console while a turn is being read */
+  retroFeedback: boolean;
+  /** idle time that counts as a cold start (the model pages back in) */
+  coldStartSeconds: number;
+  /** decode rate below this fraction of the warm baseline is "paging" */
+  pagingFactor: number;
 };
 
 export type FileNode = {
@@ -148,6 +168,8 @@ export type FileNode = {
 
 export type ServerStatus = {
   ok: boolean;
+  /** llama-server is up but still loading the model into memory (503 Loading model) */
+  loading?: boolean;
   upstream: string;
   health: { status?: string | number } | null;
   models: { id: string; meta?: Record<string, unknown> }[];
@@ -186,4 +208,7 @@ export const DEFAULT_SETTINGS: Settings = {
   autoContinue: true,
   maxContinues: 2,
   continueMode: "auto",
+  retroFeedback: true,
+  coldStartSeconds: 120,
+  pagingFactor: 0.45,
 };

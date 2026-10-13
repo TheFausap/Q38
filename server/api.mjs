@@ -283,12 +283,38 @@ function sseWrite(res, obj) {
   res.write(`data: ${JSON.stringify(obj)}\n\n`);
 }
 
+/**
+ * Prompt-progress heartbeat, the same shape llama-server streams when the
+ * request sets `return_progress`. The demo uses it so the job console has
+ * something honest to read while the "model" is thinking.
+ */
+async function demoProgress(res, payload) {
+  if (!payload || !payload.return_progress) return;
+  const messages = Array.isArray(payload.messages) ? payload.messages : [];
+  const total = Math.max(64, Math.round(messages.reduce((n, m) => n + String(m.content || "").length, 0) / 3.6));
+  const cache = Math.round(total * 0.25);
+  const started = Date.now();
+  const ticks = 6;
+  for (let i = 0; i <= ticks; i++) {
+    const processed = Math.round(cache + ((total - cache) * i) / ticks);
+    sseWrite(res, {
+      choices: [{ delta: {}, index: 0, finish_reason: null }],
+      object: "chat.completion.chunk",
+      prompt_progress: { total, cache, processed: Math.min(processed, total), time_ms: Date.now() - started },
+    });
+    await new Promise((r) => setTimeout(r, 120));
+  }
+}
+
 async function streamDemo(res, payload) {
   res.statusCode = 200;
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("X-Q38-Demo", "1");
+  const demoStartedAt = Date.now();
   const { reasoning, content } = demoChunks(payload);
+  await demoProgress(res, payload);
+  const slow = Number(process.env.DEMO_SLOW_TPS || 0);
   sseWrite(res, {
     choices: [{ delta: { reasoning_content: reasoning.join("") } }],
   });
@@ -299,17 +325,22 @@ async function streamDemo(res, payload) {
     buf += w;
     if (buf.length > 24) {
       sseWrite(res, { choices: [{ delta: { content: buf } }] });
+      const chunkWords = buf.trim() ? buf.trim().split(/\s+/).length : 0;
       buf = "";
-      await new Promise((r) => setTimeout(r, 12));
+      const pauseMs = slow > 0 ? Math.round((chunkWords / slow) * 1000) : 12;
+      await new Promise((r) => setTimeout(r, Math.min(2000, Math.max(12, pauseMs))));
     }
   }
   if (buf) sseWrite(res, { choices: [{ delta: { content: buf } }] });
+  const elapsedMs = Math.max(1, Date.now() - demoStartedAt);
+  const wordCount = content.trim().split(/\s+/).length;
+  const rate = slow > 0 ? slow : Number(((wordCount / elapsedMs) * 1000).toFixed(1));
   sseWrite(res, {
     choices: [{ delta: {}, finish_reason: "stop" }],
     timings: {
       prompt_n: 128,
-      predicted_n: 420,
-      predicted_per_second: 38.2,
+      predicted_n: Math.round(wordCount * 1.5),
+      predicted_per_second: rate,
       prompt_per_second: 210.4,
     },
     demo: true,
@@ -440,6 +471,7 @@ async function statusPayload(req) {
   const upstream = String(upstreamHeader || defaultUpstream()).replace(/\/$/, "");
   const result = {
     ok: false,
+    loading: false,
     upstream,
     health: null,
     models: [],
@@ -465,6 +497,14 @@ async function statusPayload(req) {
       result.ok = true;
     } else if (healthRes.status === "fulfilled") {
       result.health = { status: healthRes.value.status };
+      const body = await healthRes.value.text().catch(() => "");
+      // llama-server refuses every route with 503 "Loading model" until the
+      // weights are in memory: report it as warming, not as an error
+      if (healthRes.value.status === 503 && /loading model|unavailable_error/i.test(body)) {
+        result.loading = true;
+      } else {
+        result.error = `llama-server /health ${healthRes.value.status}`;
+      }
     }
     if (modelsRes.status === "fulfilled" && modelsRes.value.ok) {
       const json = await modelsRes.value.json();

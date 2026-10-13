@@ -1,4 +1,12 @@
-import type { ChatMessage, FinishInfo, Sampling, ServerStatus, Settings, Timings } from "./types";
+import type {
+  ChatMessage,
+  FinishInfo,
+  PromptProgress,
+  Sampling,
+  ServerStatus,
+  Settings,
+  Timings,
+} from "./types";
 
 export type StreamHandlers = {
   onReasoning: (chunk: string) => void;
@@ -6,10 +14,18 @@ export type StreamHandlers = {
   onTimings: (t: Timings, extra?: { demo?: boolean }) => void;
   /** fired once, when the round ends (finish_reason / stop_type). */
   onFinish?: (info: FinishInfo) => void;
+  /** llama-server's prefill heartbeat, while the prompt is being read. */
+  onProgress?: (p: PromptProgress) => void;
+  /** the server is up but the model is not in memory yet; the job is queued. */
+  onServerLoading?: (waitingMs: number) => void;
 };
 
 export type ChatStreamOptions = {
   forceDemo?: boolean;
+  /** queue the job while llama-server loads the model (default true) */
+  waitForModel?: boolean;
+  /** how long to keep queueing before giving up, ms */
+  modelWaitMs?: number;
   /** compaction briefs injected as system turns, right after the system prompt */
   systemExtra?: string[];
   /**
@@ -55,6 +71,31 @@ function isStaticHole(res: Response, bodyText?: string) {
   if (ct.includes("application/json") || ct.includes("text/event-stream")) return false;
   const t = (bodyText || "").trimStart();
   return t.startsWith("<!") || t.startsWith("<html");
+}
+
+/** llama-server answers every route with 503 "Loading model" until the weights are in. */
+export function isLoadingModel(status: number, body: string): boolean {
+  if (status !== 503) return false;
+  return /loading model|unavailable_error/i.test(body);
+}
+
+/** Sleep that gives up the moment the job is cancelled. */
+function pause(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException("aborted", "AbortError"));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 async function readMaybeJson(res: Response): Promise<unknown | null> {
@@ -103,7 +144,13 @@ async function fetchStatusDirect(settings: Settings): Promise<ServerStatus> {
       result.ok = true;
     } else if (healthRes.status === "fulfilled") {
       result.health = { status: healthRes.value.status };
-      result.error = `llama-server /health ${healthRes.value.status}`;
+      const body = await healthRes.value.text().catch(() => "");
+      if (isLoadingModel(healthRes.value.status, body)) {
+        result.loading = true;
+        result.error = null;
+      } else {
+        result.error = `llama-server /health ${healthRes.value.status}`;
+      }
     } else {
       result.error = healthRes.reason instanceof Error ? healthRes.reason.message : String(healthRes.reason);
     }
@@ -136,7 +183,10 @@ export async function fetchStatus(settings: Settings): Promise<ServerStatus> {
       });
       const json = (await readMaybeJson(res)) as ServerStatus | null;
       if (json && typeof json === "object" && "upstream" in json) {
-        return { ...json, via: json.via || "proxy" };
+        const loading =
+          json.loading === true ||
+          (json.error == null && json.ok === false && json.health != null && json.health.status === 503);
+        return { ...json, loading: json.loading ?? loading, via: json.via || "proxy" };
       }
     } catch {
       proxyDead = true;
@@ -245,6 +295,9 @@ export function buildChatPayload(
     repeat_penalty: sampling.repeat_penalty,
     max_tokens: sampling.max_tokens,
     cache_prompt: sampling.cache_prompt,
+    // llama-server streams prompt_progress chunks while it reads the prompt.
+    // Older builds ignore the field.
+    return_progress: opts.stream !== false,
     chat_template_kwargs: { enable_thinking: sampling.enable_thinking },
     reasoning_effort: sampling.reasoning_effort,
     reasoning_format: "deepseek",
@@ -296,6 +349,15 @@ async function readSse(
     }
     if (json.demo) demo = true;
     finish = finishOf(json, finish);
+    const progress = json.prompt_progress as Record<string, unknown> | undefined;
+    if (progress && typeof progress === "object" && handlers.onProgress) {
+      handlers.onProgress({
+        total: Number(progress.total) || 0,
+        cache: Number(progress.cache) || 0,
+        processed: Number(progress.processed) || 0,
+        time_ms: Number(progress.time_ms) || 0,
+      });
+    }
     const choices = json.choices as
       | { delta?: Record<string, string>; message?: Record<string, string> }[]
       | undefined;
@@ -345,7 +407,7 @@ async function openChatStream(
   headers: HeadersInit,
   payload: unknown,
   signal: AbortSignal,
-): Promise<Response | "static" | null> {
+): Promise<Response | "static" | "loading" | null> {
   try {
     const res = await fetch(url, {
       method: "POST",
@@ -361,6 +423,7 @@ async function openChatStream(
     if (!res.ok) {
       const errText = await res.text().catch(() => res.statusText);
       if (isStaticHole(res, errText)) return "static";
+      if (isLoadingModel(res.status, errText)) return "loading";
       throw new Error(errText || `llama-server ${res.status}`);
     }
     return res.body ? res : null;
@@ -374,6 +437,9 @@ async function openChatStream(
   }
 }
 
+/** How the job got on: a normal round, or a demo stream because nothing answered. */
+export type StreamOutcome = { demo: boolean; finish: FinishInfo; queuedMs: number };
+
 export async function streamChat(
   messages: ChatMessage[],
   sampling: Sampling,
@@ -381,32 +447,75 @@ export async function streamChat(
   handlers: StreamHandlers,
   signal: AbortSignal,
   opts: ChatStreamOptions = {},
-): Promise<{ demo: boolean; finish: FinishInfo }> {
+): Promise<StreamOutcome> {
   const payload = buildChatPayload(messages, sampling, settings, opts);
+  const waitForModel = opts.waitForModel !== false;
+  const modelWaitMs = opts.modelWaitMs ?? 20 * 60_000;
+  const queuedAt = Date.now();
+  let answeredAt: number | null = null;
+
+  /**
+   * llama-server refuses every route while it loads the model. Rather than
+   * failing the turn, keep the job queued and let the console show it — the
+   * weights are paging back in and the first card will be read shortly.
+   */
+  const queueWhileLoading = async (): Promise<void> => {
+    const waited = Date.now() - queuedAt;
+    if (!waitForModel) {
+      throw new Error("llama-server is still loading the model. Send again once it reports ok.");
+    }
+    if (waited > modelWaitMs) {
+      throw new Error(
+        `llama-server is still loading the model after ${Math.round(waited / 1000)}s. Give it a moment, then send again.`,
+      );
+    }
+    handlers.onServerLoading?.(waited);
+    await pause(1500, signal);
+  };
 
   if (!opts.forceDemo && !proxyDead) {
-    const proxied = await openChatStream(
-      "/api/llama/v1/chat/completions",
-      llamaHeaders(settings),
-      payload,
-      signal,
-    );
-    if (proxied === "static") {
-      proxyDead = true;
-    } else if (proxied) {
-      return readSse(proxied, handlers, signal);
+    for (;;) {
+      const proxied = await openChatStream(
+        "/api/llama/v1/chat/completions",
+        llamaHeaders(settings),
+        payload,
+        signal,
+      );
+      if (proxied === "static") {
+        proxyDead = true;
+        break;
+      }
+      if (proxied === "loading") {
+        await queueWhileLoading();
+        continue;
+      }
+      if (proxied) {
+        answeredAt = answeredAt ?? Date.now();
+        const out = await readSse(proxied, handlers, signal);
+        return { ...out, queuedMs: answeredAt - queuedAt };
+      }
+      break;
     }
   }
 
   if (!opts.forceDemo) {
-    const direct = await openChatStream(
-      `${upstream(settings)}/v1/chat/completions`,
-      llamaHeaders(settings, { Accept: "text/event-stream" }),
-      payload,
-      signal,
-    );
-    if (direct && direct !== "static") {
-      return readSse(direct, handlers, signal);
+    for (;;) {
+      const direct = await openChatStream(
+        `${upstream(settings)}/v1/chat/completions`,
+        llamaHeaders(settings, { Accept: "text/event-stream" }),
+        payload,
+        signal,
+      );
+      if (direct === "loading") {
+        await queueWhileLoading();
+        continue;
+      }
+      if (direct && direct !== "static") {
+        answeredAt = answeredAt ?? Date.now();
+        const out = await readSse(direct, handlers, signal);
+        return { ...out, queuedMs: answeredAt - queuedAt };
+      }
+      break;
     }
   }
 
@@ -417,9 +526,15 @@ export async function streamChat(
       payload,
       signal,
     );
+    if (demoRes === "loading") {
+      // the middleware is up but llama-server is still loading the model
+      await queueWhileLoading();
+      return streamChat(messages, sampling, settings, handlers, signal, opts);
+    }
     if (demoRes && demoRes !== "static") {
+      answeredAt = answeredAt ?? Date.now();
       const out = await readSse(demoRes, handlers, signal);
-      return { ...out, demo: true };
+      return { ...out, demo: true, queuedMs: answeredAt - queuedAt };
     }
     if (demoRes === "static") proxyDead = true;
   }
@@ -458,6 +573,8 @@ export async function completeOnce(
     chat_template_kwargs: { enable_thinking: false },
     reasoning_effort: "none",
     reasoning_format: "deepseek",
+    // a brief is a one-shot: no streaming, so no prefill heartbeat either
+    return_progress: false,
   };
 
   const parse = (json: unknown): CompletionResult | null => {

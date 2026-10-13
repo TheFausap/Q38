@@ -15,6 +15,7 @@ The UI is built around Turbo Brilliance — 27 reasoning constructs, matching in
 - Session history, regen, stop, syntax-highlighted code with copy/save
 - **Context folding**: older turns are rewritten by the model into one handoff brief before the window fills up
 - **Reply continuation**: a reply cut off by `max_tokens` resumes itself, mid-code-block included
+- **Job console**: a punched-card readout for the slow parts — model loading, prompt reading, and weights paging back in after idle
 - KaTeX for LaTeX: `$$...$$`, `$...$`, `\[...\]`, `\(...\)`, and `align`/`equation` environments
 - Same-origin proxy so the browser never talks to `localhost` and CORS is not your problem
 - Offline demo stream if llama-server is down, so the workbench still exercises
@@ -121,6 +122,49 @@ and code-fence repair, so a half-written ```ts block stays one code block.
 
 In offline demo mode both features still exercise: folding falls back to the local
 extract and the demo stream answers a continuation with more code.
+
+## Slow turns: the job console
+
+On a small GPU the model is often not wrong so much as *elsewhere*: llama-server
+holds the request for a minute while the weights come back in, then decodes at a
+fraction of speed until the cache warms again. A bare caret there reads as a hang.
+The workbench reads the machine's own signals and shows the job as a punched-card
+run instead.
+
+**What it keys off.** Three real signals, no guessing:
+
+| Signal | Source | Shown as |
+| --- | --- | --- |
+| `503 {"error":{"message":"Loading model"}}` | every llama-server route while loading | `MODEL LOADING INTO CORE — JOB nnnn QUEUED` |
+| `prompt_progress {total, cache, processed, time_ms}` | streamed once per prefill chunk (`return_progress: true`) | `CARDS READ n / n` with a punched card deck |
+| `timings.predicted_per_second` vs. a warm baseline | the stream itself | `DECODING 3.2 TOK/S · WARM BASELINE 42 TOK/S` |
+
+A turn that has produced no token for 4 s, or is decoding below 45% of the baseline
+the workbench measured while the machine was warm, is labelled **paging**:
+`PAGING FROM DRUM — EXPECT DELAY`. The baseline is a slow-rise EMA kept in
+`localStorage`, and it only counts rounds that actually decoded — a slow round can
+never teach the workbench that slow is normal. No progress bar is ever advanced by a
+timer.
+
+**What you see.** A line printer console takes the place of the pending reply: job
+number, a state lamp, a wall clock, the card deck feeding the read head, six register
+figures (cards, columns punched, prefill %, read rate, ETA, cache hits), a spooling
+line of tape, and a `cancel job` handle. Once the first token lands the long form
+folds away and a compact strip takes over above the composer while the job keeps
+crawling; the top bar carries a small pip so a job is never invisible, even scrolled
+away. Everything is monospace and paper-white on carbon — the same palette as the
+rest of the bench.
+
+**Control.** Setup → *Machine pacing*:
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `punched-card job console` | on | off = one minimal pulse, same signals |
+| `cold start` | 120 s | idle time after which a send counts as a cold start |
+| `paging factor` | 0.45 | decode rate vs. warm baseline that reads as paging |
+
+The console also runs in offline demo mode (`DEMO_SLOW_TPS=2 npm run dev` pretends to
+be a cold machine), so the animation can be judged without a loaded GPU.
 
 ## Constructs (primer)
 
