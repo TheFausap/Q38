@@ -205,6 +205,30 @@ button { cursor: pointer; }
   border-radius: var(--radius);
 }
 .dropzone.over { border-color: var(--brass); color: var(--brass); }
+
+/* While a file is in the air the whole window is the target, and it says so. */
+.drop-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  pointer-events: none;
+  display: grid;
+  place-items: center;
+  background: rgba(12, 10, 9, 0.72);
+  border: 2px dashed var(--brass);
+  box-shadow: inset 0 0 0 6px rgba(212, 165, 116, 0.08);
+}
+.drop-veil span {
+  font-family: var(--mono);
+  font-size: 13px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--brass-2);
+  background: #14110e;
+  border: 1px solid #3d3529;
+  border-radius: var(--radius);
+  padding: 12px 20px;
+}
 .tree { overflow: auto; flex: 1; padding: 0 6px 12px; }
 .tree-row {
   display: flex;
@@ -434,6 +458,8 @@ button { cursor: pointer; }
   font-size: 12.5px;
 }
 .banner.warn { background: #21180f; }
+.banner.note { background: #14161a; color: #b9c6d2; border-bottom-color: #2a3038; }
+.banner.note .icon-btn { padding: 3px 8px; font-size: 11px; }
 .banner.warming {
   background-color: #171410;
   color: #e0c9a4;

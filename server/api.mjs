@@ -139,6 +139,47 @@ function readBody(req) {
     req.on("error", reject);
   });
 }
+/** Same, but stops reading once the body is past `limit` bytes. */
+function readBodyCapped(req, limit) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on("data", (c) => {
+      size += c.length;
+      if (size > limit) {
+        const err = new Error(`request body larger than ${Math.round(limit / 1e6)} MB`);
+        err.statusCode = 413;
+        req.destroy();
+        reject(err);
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+/**
+ * What a dropped file is allowed to be called once it lands in the workspace.
+ * Only the base name survives, so a drop can never write outside the root.
+ */
+function uploadName(raw) {
+  const base = path.basename(String(raw || "").replace(/\\/g, "/"));
+  const clean = base.replace(/[\u0000-\u001f\u007f]/g, "").trim();
+  if (!clean || clean === "." || clean === "..") return null;
+  return clean.slice(0, 120);
+}
+/** Never clobber a file that is already in the workspace. */
+function uniqueName(root, name) {
+  if (!fs.existsSync(path.join(root, name))) return { name, renamed: false };
+  const ext = path.extname(name);
+  const stem = name.slice(0, name.length - ext.length);
+  for (let i = 2; i < 500; i += 1) {
+    const candidate = `${stem}-${i}${ext}`;
+    if (!fs.existsSync(path.join(root, candidate))) return { name: candidate, renamed: true };
+  }
+  return { name: `${stem}-${Date.now()}${ext}`, renamed: true };
+}
 
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -519,6 +560,9 @@ async function statusPayload(req) {
   return result;
 }
 
+/** Longest drop the workbench will write into ./workspace. */
+const UPLOAD_MAX_BYTES = 8 * 1024 * 1024;
+
 export function createApi() {
   return async function q38Api(req, res, next) {
     const host = req.headers.host || "localhost";
@@ -567,6 +611,46 @@ export function createApi() {
         }
         const content = fs.readFileSync(full, "utf8");
         sendJson(res, 200, { path: rel, content, size: stat.size });
+        return;
+      }
+
+      if (url.pathname === "/api/workspace/upload" && req.method === "POST") {
+        let raw;
+        try {
+          raw = await readBodyCapped(req, UPLOAD_MAX_BYTES + 64_000);
+        } catch (err) {
+          sendJson(res, err?.statusCode || 413, {
+            error: err instanceof Error ? err.message : "could not read the upload",
+          });
+          return;
+        }
+        let payload = null;
+        try {
+          payload = JSON.parse(raw.toString("utf8"));
+        } catch {
+          payload = null;
+        }
+        const name = uploadName(payload?.path);
+        if (!name) {
+          sendJson(res, 400, { error: "a file name is required" });
+          return;
+        }
+        if (typeof payload?.content !== "string") {
+          sendJson(res, 400, { error: `${name} is not text — only text files can be saved` });
+          return;
+        }
+        const bytes = Buffer.byteLength(payload.content, "utf8");
+        if (bytes > UPLOAD_MAX_BYTES) {
+          sendJson(res, 413, {
+            error: `${name} is ${bytes} bytes, over the ${UPLOAD_MAX_BYTES} byte limit`,
+          });
+          return;
+        }
+        const root = workspaceRoot();
+        fs.mkdirSync(root, { recursive: true });
+        const unique = uniqueName(root, name);
+        fs.writeFileSync(path.join(root, unique.name), payload.content, "utf8");
+        sendJson(res, 200, { path: unique.name, size: bytes, renamed: unique.renamed });
         return;
       }
 
