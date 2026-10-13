@@ -68,7 +68,8 @@ Point **Setup → llama-server URL** at your server (default `http://127.0.0.1:8
 
 **Dropping a file.** Drop it anywhere in the window — the whole window is the target,
 not just the dashed box, and the file never reaches the browser (which would navigate
-away). Each drop does two things: the file is written into `WORKSPACE_DIR` so it appears
+away). If drag and drop does not reach the page at all (some remote/VDI setups, or a
+frame that swallows the drag), the box's **or browse…** picker takes the same path. Each drop does two things: the file is written into `WORKSPACE_DIR` so it appears
 in the tree, and — up to 800 KB, the same limit the context reader uses — it is pinned
 to the next turn. The banner afterwards names every file and what became of it; a name
 that is already taken comes back as `config-2.json` rather than overwriting the original.
