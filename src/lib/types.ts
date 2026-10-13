@@ -4,6 +4,8 @@ export type Attachment = {
   path: string;
   content: string;
   source: "workspace" | "upload";
+  /** pinned to the turn only: the workspace write did not happen */
+  unstored?: boolean;
 };
 
 export type Timings = {

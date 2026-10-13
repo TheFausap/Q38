@@ -195,20 +195,40 @@ export async function fetchStatus(settings: Settings): Promise<ServerStatus> {
   return fetchStatusDirect(settings);
 }
 
+/**
+ * The workspace tree. A failure is reported as `ok: false` rather than an empty
+ * list, because "the workbench cannot reach its own API" and "the folder is
+ * empty" look identical in the UI otherwise — and they need different answers.
+ */
 export async function fetchTree() {
-  if (proxyDead) {
-    return { root: "", children: [], missing: true };
+  const failed = (reason: string) => ({
+    ok: false as const,
+    root: "",
+    children: [] as import("./types").FileNode[],
+    missing: true,
+    error: reason,
+  });
+  if (proxyDead) return failed("the workbench API is not reachable — run npm run dev or npm start");
+  try {
+    const res = await fetch("/api/workspace/tree");
+    const json = (await readMaybeJson(res)) as {
+      root?: string;
+      children?: import("./types").FileNode[];
+      missing?: boolean;
+      error?: string;
+    } | null;
+    if (!json || typeof json !== "object" || !Array.isArray(json.children)) {
+      return failed(`the workspace API answered ${res.status} and nothing usable`);
+    }
+    return {
+      ok: true as const,
+      root: json.root || "",
+      children: json.children,
+      missing: Boolean(json.missing),
+    };
+  } catch {
+    return failed("the workbench API is not reachable — is npm run dev still running?");
   }
-  const res = await fetch("/api/workspace/tree");
-  const json = await readMaybeJson(res);
-  if (!json || typeof json !== "object") {
-    return { root: "", children: [], missing: true };
-  }
-  return json as {
-    root: string;
-    children: import("./types").FileNode[];
-    missing?: boolean;
-  };
 }
 
 /**

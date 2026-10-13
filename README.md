@@ -73,7 +73,11 @@ frame that swallows the drag), the box's **or browse…** picker takes the same 
 in the tree, and — up to 800 KB, the same limit the context reader uses — it is pinned
 to the next turn. The banner afterwards names every file and what became of it; a name
 that is already taken comes back as `config-2.json` rather than overwriting the original.
-Files over 8 MB are refused with a reason, never silently dropped.
+Files over 8 MB are refused with a reason, never silently dropped. If the workbench
+API cannot be reached at all (the dev server was stopped, say), the file is pinned to
+the turn and the chip says **not in workspace** — the pin is real, the save is not, and
+the workspace tree says *Workspace unavailable* rather than pretending the folder is
+empty.
 
 ```bash
 npm run build

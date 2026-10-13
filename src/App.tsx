@@ -162,6 +162,7 @@ export function App() {
   const [folding, setFolding] = useState(false);
   const [exactTokens, setExactTokens] = useState<number | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [treeError, setTreeError] = useState<string | null>(null);
   const [dropNotice, setDropNotice] = useState<string | null>(null);
   const [job, setJob] = useState<Job | null>(null);
   const [tick, setTick] = useState(0);
@@ -219,8 +220,10 @@ export function App() {
     try {
       const t = await fetchTree();
       setTree(t.children || []);
+      setTreeError(t.ok ? null : t.error || "the workspace could not be read");
     } catch {
       setTree([]);
+      setTreeError("the workspace could not be read");
     }
   }, []);
 
@@ -244,7 +247,13 @@ export function App() {
   useEffect(() => {
     void refreshTree();
     void refreshStatus();
-    const id = window.setInterval(() => void refreshStatus(), 8000);
+    // the tree is re-read with the status: a file added to ./workspace by hand
+    // shows up, and a workbench whose API went away stops claiming the folder
+    // is empty
+    const id = window.setInterval(() => {
+      void refreshStatus();
+      void refreshTree();
+    }, 8000);
     return () => window.clearInterval(id);
   }, [refreshTree, refreshStatus]);
 
@@ -542,7 +551,7 @@ export function App() {
         if (f.size > PIN_MAX_BYTES) {
           notes.push(`${target} is ${humanBytes(f.size)} — too big to pin as context`);
         } else {
-          next.push({ path: target, content, source: "upload" });
+          next.push({ path: target, content, source: "upload", unstored: !stored });
           if (!stored) notes.push(`${target} is pinned to this turn only`);
         }
       }
@@ -1358,6 +1367,7 @@ export function App() {
             onToggleFile={toggleFile}
             onPreviewFile={previewFile}
             onFiles={onFiles}
+            treeError={treeError}
           />
         )}
         <Chat
