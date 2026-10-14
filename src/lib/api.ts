@@ -79,6 +79,16 @@ export function isLoadingModel(status: number, body: string): boolean {
   return /loading model|unavailable_error/i.test(body);
 }
 
+/**
+ * The proxy answered, but it could not reach llama-server at all. Not an error
+ * to show the user: it means this route is dead, so the send carries on down
+ * the chain and lands on the offline demo.
+ */
+export function isUpstreamDown(status: number, body: string): boolean {
+  if (status !== 502 && status !== 504) return false;
+  return /llama-server unreachable|ECONNREFUSED|socket hang up/i.test(body);
+}
+
 /** Sleep that gives up the moment the job is cancelled. */
 function pause(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -464,13 +474,21 @@ async function openChatStream(
       const errText = await res.text().catch(() => res.statusText);
       if (isStaticHole(res, errText)) return "static";
       if (isLoadingModel(res.status, errText)) return "loading";
+      // the server is down rather than complaining: fall through so the demo
+      // can answer instead of failing the turn with a transport error
+      if (isUpstreamDown(res.status, errText)) return null;
       throw new Error(errText || `llama-server ${res.status}`);
     }
     return res.body ? res : null;
   } catch (err) {
     if (signal.aborted) throw err;
     if (err instanceof DOMException && err.name === "AbortError") throw err;
-    if (err instanceof Error && err.message && !/Failed to fetch|NetworkError|unreachable/i.test(err.message)) {
+    /* Browsers say "Failed to fetch", Chrome "net::ERR_CONNECTION_REFUSED",
+       Node/undici "fetch failed", and a proxy may say "unreachable". None of
+       them is worth failing the turn over: they mean the model is not there,
+       which is what the fallback chain and the demo exist for. */
+    const transport = /failed to fetch|fetch failed|networkerror|unreachable|econnrefused|socket hang up|err_connection/i;
+    if (err instanceof Error && err.message && !transport.test(err.message)) {
       throw err;
     }
     return null;

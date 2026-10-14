@@ -118,7 +118,10 @@ messages back into the window.
 
 **Continuation.** When a round stops on `finish_reason: "length"` the reply resumes
 itself, up to **continue rounds** times (default 2, 0 = manual only). Any reply has a
-manual **continue**. The cut-off text is sent back as a trailing assistant message
+A reply that *stopped short* — `finish_reason: "length"`, or text that ends inside an open
+code block — is offered **continue this reply** / **finish the code block** directly under
+it, and only then: a reply that finished cleanly gets no resume button at all. The cut-off
+text is sent back as a trailing assistant message
 with `continue_final_message` + `add_generation_prompt: false`, which llama-server
 resumes exactly where it stopped; a server that refuses it falls back to a resume
 directive. The resumed text is stitched into the same message with overlap trimming
@@ -135,7 +138,9 @@ and code-fence repair, so a half-written ```ts block stays one code block.
 | `continue mode` | auto | `prefill` (trailing assistant message) → `directive` fallback |
 
 In offline demo mode both features still exercise: folding falls back to the local
-extract and the demo stream answers a continuation with more code.
+extract and the demo stream answers a continuation with more code. With llama-server
+down, a turn streams from the demo stream (badged `demo`) instead of failing with a
+transport error — a refused connection is a reason to fall back, not to lose the turn.
 
 ## Slow turns: the job console
 
