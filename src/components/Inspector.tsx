@@ -8,7 +8,7 @@ import {
 } from "../lib/context";
 import { GROUPS, familyLabel, modeById, MODES, reasonTag } from "../lib/modes";
 import { formatClock, formatRate, type JobTick, type PaceStats } from "../lib/pacing";
-import type { Compaction, ModeFamily, Sampling, ServerStatus, Settings } from "../lib/types";
+import type { ArchiveRef, Compaction, ModeFamily, Sampling, ServerStatus, Settings } from "../lib/types";
 
 export type InspectorTab = "construct" | "sample" | "context" | "server";
 
@@ -38,6 +38,14 @@ export function Inspector({
   streaming,
   pace,
   tick,
+  archives,
+  held,
+  memRoot,
+  memBusy,
+  onPullBack,
+  onRelease,
+  onForget,
+  onUnarchive,
 }: {
   tab: InspectorTab;
   onTab: (t: InspectorTab) => void;
@@ -62,6 +70,14 @@ export function Inspector({
   streaming: boolean;
   pace: PaceStats;
   tick: JobTick | null;
+  archives: ArchiveRef[];
+  held: string[];
+  memRoot: string;
+  memBusy: string | null;
+  onPullBack: (id: string) => void;
+  onRelease: (id: string) => void;
+  onForget: (id: string) => void;
+  onUnarchive: () => void;
 }) {
   const [q, setQ] = useState("");
   const mode = modeById(modeId);
@@ -419,6 +435,77 @@ export function Inspector({
             (<code>continue_final_message</code>); llama-server resumes it without repeating. A
             server that refuses falls back to a resume directive.
           </p>
+
+          <div className="group-label">Memory ({archives.length} on disk)</div>
+          <p className="hint">
+            When the window fills, the oldest turns are moved to disk as chunks and stand in as one
+            register line each — exact, not paraphrased. A turn recalls what it needs on its own; you
+            can pull a chunk back by hand here, and it stays until you let it go. Folding below is
+            what happens when the store cannot be reached.
+          </p>
+          {archives.length === 0 && (
+            <p className="muted pad">
+              Nothing on disk{memRoot ? <> — the store lives at <code>{memRoot}</code></> : null}.
+            </p>
+          )}
+          {archives.map((c) => {
+            const isHeld = held.includes(c.id);
+            return (
+              <div key={c.id} className="row-card">
+                <div className="row-top">
+                  <code className="break">{c.register}</code>
+                </div>
+                <div className="row-meta">
+                  {formatTokens(c.tokens)} prompt tokens out of the window
+                  {c.recalls > 0 ? ` · recalled ×${c.recalls}` : ""}
+                  {isHeld ? " · pinned back in" : ""}
+                </div>
+                <div className="row-actions">
+                  {isHeld ? (
+                    <button
+                      type="button"
+                      className="linkish"
+                      onClick={() => onRelease(c.id)}
+                      disabled={streaming || memBusy !== null}
+                      title="Send it back out of the window"
+                    >
+                      let go
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="linkish"
+                      onClick={() => onPullBack(c.id)}
+                      disabled={streaming || memBusy !== null}
+                      title="Read this chunk back from disk into the window"
+                    >
+                      {memBusy === c.id ? "reading…" : "pull back"}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="linkish danger-text"
+                    onClick={() => onForget(c.id)}
+                    disabled={streaming || memBusy !== null}
+                    title="Delete this chunk from disk — the messages stay in the transcript"
+                  >
+                    forget
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+          {archives.length > 0 && (
+            <button
+              type="button"
+              className="linkish"
+              onClick={onUnarchive}
+              disabled={streaming || memBusy !== null}
+              title="Bring every chunk back into the window and clear the archive"
+            >
+              {memBusy === "all" ? "clearing…" : "unarchive everything"}
+            </button>
+          )}
 
           <div className="group-label">Folds ({compactions.length})</div>
           {compactions.length === 0 && <p className="muted pad">Nothing folded yet.</p>}

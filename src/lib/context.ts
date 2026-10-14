@@ -145,6 +145,32 @@ export function activeCompaction(session: { compactions?: Compaction[] }): Compa
 }
 
 /** Everything after the fold boundary — the messages that still travel verbatim. */
+/**
+ * The messages still in the window after a cut at `upToId` (the messages moved
+ * out stay in the transcript either way — only what the model sees changes).
+ */
+export function messagesAfter(messages: ChatMessage[], upToId?: string | null): ChatMessage[] {
+  if (!upToId) return messages;
+  const idx = messages.findIndex((m) => m.id === upToId);
+  return idx < 0 ? messages : messages.slice(idx + 1);
+}
+
+/**
+ * Where the window currently starts. An archive and a fold are two ways of
+ * cutting the same transcript, so the newest cut wins — and a session that has
+ * archived never falls back to an older fold.
+ */
+export function cutIdOf(session: {
+  archives?: { toId: string }[];
+  compactions?: { upToId: string }[];
+}): string | null {
+  const archived = session.archives ?? [];
+  if (archived.length) return archived[archived.length - 1].toId;
+  const folds = session.compactions ?? [];
+  if (folds.length) return folds[folds.length - 1].upToId;
+  return null;
+}
+
 export function unfoldedMessages(messages: ChatMessage[], compaction?: Compaction): ChatMessage[] {
   if (!compaction) return messages;
   const cut = messages.findIndex((m) => m.id === compaction.upToId);

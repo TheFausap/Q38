@@ -8,12 +8,18 @@ import {
   countTokens,
   fetchFile,
   fetchStatus,
+  memoryForget,
+  memoryGet,
+  memoryList,
+  memoryPut,
   uploadWorkspaceFile,
   fetchTree,
   streamChat,
 } from "./lib/api";
 import {
   activeCompaction,
+  cutIdOf,
+  messagesAfter,
   canFold,
   compactionBriefText,
   compactionNetSavings,
@@ -27,6 +33,14 @@ import {
   type ContextUsage,
 } from "./lib/context";
 import { modeById, reasonTag } from "./lib/modes";
+import {
+  RECALL_BUDGET_FRACTION,
+  describeChunk,
+  planRecall,
+  recallText,
+  registerLine,
+  registerText,
+} from "./lib/memory";
 import {
   DEFAULT_PACING,
   loadPaceStats,
@@ -59,6 +73,7 @@ import {
   uid,
 } from "./lib/storage";
 import type {
+  ArchiveRef,
   Attachment,
   ChatMessage,
   Compaction,
@@ -159,6 +174,9 @@ export function App() {
   const [demoNotice, setDemoNotice] = useState(false);
   const [modeWarn, setModeWarn] = useState<string | null>(null);
   const [foldNotice, setFoldNotice] = useState<string | null>(null);
+  const [memNotice, setMemNotice] = useState<string | null>(null);
+  const [memBusy, setMemBusy] = useState<string | null>(null);
+  const [memRoot, setMemRoot] = useState<string>("");
   const [folding, setFolding] = useState(false);
   const [exactTokens, setExactTokens] = useState<number | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -202,6 +220,22 @@ export function App() {
     () => sessions.find((s) => s.id === activeId) || sessions[0],
     [sessions, activeId],
   );
+
+  useEffect(() => {
+    let alive = true;
+    const id = session?.id;
+    if (!id) return;
+    void memoryList(id)
+      .then((out) => {
+        if (alive) setMemRoot(out.root);
+      })
+      .catch(() => {
+        if (alive) setMemRoot("");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [session?.id, session?.archives?.length]);
 
   const currentSession = useCallback((): Session | undefined => {
     return sessionsRef.current.find((s) => s.id === activeId) ?? sessionsRef.current[0];
@@ -651,11 +685,15 @@ export function App() {
     () => activeCompaction({ compactions: session?.compactions ?? [] }),
     [session],
   );
+  const archivedChunks = useMemo(() => session?.archives ?? [], [session]);
   const liveMessages = useMemo(
-    () => (session ? unfoldedMessages(session.messages, carry) : []),
-    [session, carry],
+    () => (session ? messagesAfter(session.messages, cutIdOf(session)) : []),
+    [session],
   );
-  const briefTexts = useMemo(() => (carry ? [compactionBriefText(carry)] : []), [carry]);
+  const briefTexts = useMemo(
+    () => (archivedChunks.length ? [registerText(archivedChunks)] : carry ? [compactionBriefText(carry)] : []),
+    [archivedChunks, carry],
+  );
 
   const usage = useMemo<ContextUsage>(
     () =>
@@ -668,6 +706,123 @@ export function App() {
         foldedMessages: session ? session.messages.length - liveMessages.length : 0,
       }),
     [liveMessages, briefTexts, settings, sampling, status?.props, session],
+  );
+
+  /* ------------------------------------------------------------- memory */
+
+  /** The chunks this session has moved out of the window. */
+  const archivesOf = useCallback(
+    (target: Session | undefined): ArchiveRef[] => target?.archives ?? [],
+    [],
+  );
+
+  /**
+   * Move the older half of `base` onto disk. Nothing is summarised and nothing
+   * is deleted: the messages stay in the transcript, and the window keeps one
+   * register line per chunk plus the terms needed to find it again.
+   *
+   * Returns `ok: false` when the store cannot be reached, which is the signal
+   * to fall back to folding — a workbench on a static host still runs, just
+   * without memory.
+   */
+  const archiveWindow = useCallback(
+    async (
+      target: Session,
+      base: ChatMessage[],
+      _opts: { auto: boolean },
+    ): Promise<{ ok: true; ref: ArchiveRef; tail: ChatMessage[] } | { ok: false; why: string }> => {
+      const plan = planFold(base, settings.keepTailMessages);
+      if (!plan) {
+        return { ok: false, why: "the transcript is still one turn — nothing to move out" };
+      }
+      const tokens = headPromptCost(plan.head);
+      const described = describeChunk(plan.head, tokens);
+      const seq = (target.archives?.length ?? 0) + 1;
+      const ref: ArchiveRef = {
+        id: `c${String(seq).padStart(3, "0")}-${uid().slice(0, 6)}`,
+        seq,
+        at: Date.now(),
+        fromId: plan.head[0].id,
+        toId: plan.boundaryId,
+        count: plan.head.length,
+        tokens,
+        register: registerLine({
+          id: "",
+          seq,
+          label: described.label,
+          paths: described.paths,
+          tokens,
+          count: plan.head.length,
+        }),
+        label: described.label,
+        paths: described.paths,
+        terms: described.terms,
+        recalls: 0,
+        lastRecallAt: null,
+      };
+
+      setFolding(true);
+      try {
+        await memoryPut(
+          target.id,
+          { ...ref, body: { messages: plan.head } },
+          { title: target.title, createdAt: target.createdAt, updatedAt: Date.now() },
+        );
+      } catch (err) {
+        setFolding(false);
+        return {
+          ok: false,
+          why: err instanceof Error ? err.message : "the memory store is not reachable",
+        };
+      }
+      patchSession(target.id, (s) => ({
+        ...s,
+        archives: [...(s.archives ?? []), ref],
+        updatedAt: Date.now(),
+      }));
+      setFolding(false);
+      return { ok: true, ref, tail: plan.tail };
+    },
+    [settings.keepTailMessages],
+  );
+
+  /**
+   * Pull chunks back into the window. Bodies come from disk; the register refs
+   * record that it happened, so the inspector and the transcript can say so.
+   */
+  const recallChunks = useCallback(
+    async (
+      target: Session,
+      ids: string[],
+    ): Promise<{ texts: string[]; tokens: number; refs: ArchiveRef[] }> => {
+      const refs = archivesOf(target);
+      const texts: string[] = [];
+      const used: ArchiveRef[] = [];
+      let tokens = 0;
+      for (const id of ids) {
+        const ref = refs.find((r) => r.id === id);
+        if (!ref) continue;
+        try {
+          const chunk = await memoryGet(target.id, id);
+          texts.push(recallText(ref, chunk.body));
+          used.push(ref);
+          tokens += ref.tokens;
+        } catch {
+          /* gone from disk: skip it rather than failing the whole send */
+        }
+      }
+      if (used.length) {
+        const at = Date.now();
+        patchSession(target.id, (s) => ({
+          ...s,
+          archives: (s.archives ?? []).map((r) =>
+            used.some((u) => u.id === r.id) ? { ...r, recalls: r.recalls + 1, lastRecallAt: at } : r,
+          ),
+        }));
+      }
+      return { texts, tokens, refs: used };
+    },
+    [archivesOf],
   );
 
   /** Rewrite the older half of `base` into one handoff brief. */
@@ -756,6 +911,100 @@ export function App() {
       )} tokens (−${formatTokens(compactionNetSavings(out.compaction))}).`,
     );
   }, [currentSession, folding, foldWindow]);
+
+  /* ------------------------------------------------- memory, by hand */
+
+  /** Pull one chunk back into the window, now and on the next sends. */
+  const pullBack = useCallback(
+    async (id: string) => {
+      const target = currentSession();
+      if (!target) return;
+      const ref = archivesOf(target).find((r) => r.id === id);
+      if (!ref) return;
+      setMemBusy(id);
+      try {
+        const back = await recallChunks(target, [id]);
+        if (!back.texts.length) {
+          setMemNotice(`#${ref.seq} is no longer on disk — nothing to pull back.`);
+          return;
+        }
+        patchSession(target.id, (s) => ({
+          ...s,
+          held: [...new Set([...(s.held ?? []), id])],
+          updatedAt: Date.now(),
+        }));
+        setMemNotice(
+          `#${ref.seq} is back in the window (${formatTokens(ref.tokens)} prompt tokens) and stays there until you let it go.`,
+        );
+      } finally {
+        setMemBusy(null);
+      }
+    },
+    [archivesOf, currentSession, recallChunks],
+  );
+
+  /** Let a pinned chunk go out of the window again. */
+  const releaseBack = useCallback(
+    (id: string) => {
+      const target = currentSession();
+      if (!target) return;
+      const ref = archivesOf(target).find((r) => r.id === id);
+      patchSession(target.id, (s) => ({
+        ...s,
+        held: (s.held ?? []).filter((x) => x !== id),
+        updatedAt: Date.now(),
+      }));
+      setMemNotice(`#${ref?.seq ?? "?"} is out of the window again. The chunk is still on disk.`);
+    },
+    [archivesOf, currentSession],
+  );
+
+  /** Throw a chunk away for good. */
+  const forgetChunk = useCallback(
+    async (id: string) => {
+      const target = currentSession();
+      if (!target) return;
+      const ref = archivesOf(target).find((r) => r.id === id);
+      setMemBusy(id);
+      try {
+        await memoryForget(target.id, [id]);
+      } catch {
+        /* the ref still goes: the window should not keep pointing at a body we gave up on */
+      } finally {
+        patchSession(target.id, (s) => ({
+          ...s,
+          archives: (s.archives ?? []).filter((r) => r.id !== id),
+          held: (s.held ?? []).filter((x) => x !== id),
+          updatedAt: Date.now(),
+        }));
+        setMemBusy(null);
+        setMemNotice(`#${ref?.seq ?? "?"} is gone from disk. The messages are still in the transcript.`);
+      }
+    },
+    [archivesOf, currentSession],
+  );
+
+  /** Undo the whole archive: everything comes back into the window. */
+  const unarchive = useCallback(async () => {
+    const target = currentSession();
+    if (!target) return;
+    const chunks = archivesOf(target);
+    if (!chunks.length) return;
+    setMemBusy("all");
+    try {
+      await memoryForget(target.id, []);
+    } catch {
+      /* leave the refs alone if the store refused: better a stale pointer than a lie */
+      setMemBusy(null);
+      setMemNotice("The memory store refused the delete — the archive is still on disk.");
+      return;
+    }
+    patchSession(target.id, (s) => ({ ...s, archives: [], held: [], updatedAt: Date.now() }));
+    setMemBusy(null);
+    setMemNotice(
+      `Archive cleared — ${chunks.length} chunk${chunks.length === 1 ? "" : "s"} back in the window, nothing lost.`,
+    );
+  }, [archivesOf, currentSession]);
 
   const unfold = useCallback(
     (index: number) => {
@@ -977,10 +1226,26 @@ export function App() {
   };
 
   /** Fold if the window is about to overflow; return the window to send. */
-  const prepareWindow = async (target: Session, history: ChatMessage[], incoming: ChatMessage[]) => {
+  /**
+   * Get the window ready to send: move what no longer fits onto disk, pull back
+   * what this turn needs, and fall back to folding only if the disk is out of
+   * reach. The recall set is decided here, once, before the stream starts —
+   * re-ranking mid-turn would invalidate llama-server's prompt cache every
+   * chunk, which on a big model is the whole cost of the feature.
+   */
+  const prepareWindow = async (
+    target: Session,
+    history: ChatMessage[],
+    incoming: ChatMessage[],
+    query: string,
+  ) => {
+    const archived = archivesOf(target);
     const previous = activeCompaction(target);
-    let wire = unfoldedMessages(history, previous);
-    let systemExtra = previous ? [compactionBriefText(previous)] : [];
+    // an archive and a fold are two ways of cutting the same transcript; the
+    // archive wins when the session has one
+    let wire = archived.length ? history : unfoldedMessages(history, previous);
+    let systemExtra = archived.length ? [registerText(archived)] : previous ? [compactionBriefText(previous)] : [];
+
     const probe = measureContext({
       messages: [...wire, ...incoming],
       summaries: systemExtra,
@@ -989,24 +1254,76 @@ export function App() {
       props: status?.props ?? null,
     });
     const trigger = shouldAutoCompact(probe, settings, canFold(wire, settings));
+
     if (trigger.fold) {
-      const out = await foldWindow(target, wire, { auto: true });
+      const out = await archiveWindow(target, wire, { auto: true });
       if (out.ok) {
         wire = out.tail;
-        systemExtra = [compactionBriefText(out.compaction)];
-        setFoldNotice(
-          `Context was at ${formatPct(trigger.pct)} — folded ${out.compaction.foldedMessages} messages into a ${
-            out.compaction.source === "model" ? "model-written" : "local"
-          } brief (−${formatTokens(compactionNetSavings(out.compaction))} tokens), then sent.`,
+        systemExtra = [registerText([...(archived ?? []), out.ref])];
+        setMemNotice(
+          `Window was at ${formatPct(trigger.pct)} — moved ${out.ref.count} messages (#${out.ref.seq}) to disk as one register line (−${formatTokens(
+            out.ref.tokens,
+          )} prompt tokens). Nothing was summarised; ask for it and it comes back verbatim.`,
         );
       } else {
-        setFoldNotice(`Context at ${formatPct(trigger.pct)}, not folded: ${out.why}.`);
+        // no store: the old lossy path, announced as such
+        const folded = await foldWindow(target, wire, { auto: true });
+        if (folded.ok) {
+          wire = folded.tail;
+          systemExtra = [compactionBriefText(folded.compaction)];
+          setFoldNotice(
+            `Context was at ${formatPct(trigger.pct)} — the memory store is out of reach (${out.why}), so ${folded.compaction.foldedMessages} messages were folded into a ${
+              folded.compaction.source === "model" ? "model-written" : "local"
+            } brief instead (−${formatTokens(compactionNetSavings(folded.compaction))} tokens).`,
+          );
+        } else {
+          setFoldNotice(`Context at ${formatPct(trigger.pct)}, not folded: ${folded.why}.`);
+        }
       }
     } else if (probe.pct >= settings.compactAt) {
       setFoldNotice(`Window at ${formatPct(probe.pct)}: ${trigger.reason}.`);
-    } else {
-      setFoldNotice(null);
     }
+
+    /* Automatic recall: whatever the cut, this turn may need something that is
+       no longer in the window. The budget is a share of the window plus the
+       room that actually exists right now — on a small window a single chunk is
+       often bigger than the share alone, and a turn that names a file wants
+       that chunk. It is capped at half the window so recall can never crowd out
+       the work. */
+    const budget = resolveBudget(settings, sampling, status?.props ?? null);
+    const share = Math.round(budget.budget * RECALL_BUDGET_FRACTION);
+    const slack = Math.max(0, budget.budget - probe.used);
+    const recallBudget = Math.max(
+      share,
+      Math.min(share + slack, Math.round(budget.budget * 0.5)),
+    );
+    const held = new Set(target.held ?? []);
+    const plan = planRecall({
+      query,
+      refs: archivesOf(target).filter((r) => !held.has(r.id)),
+      budgetTokens: recallBudget,
+    });
+    if (plan.ids.length) {
+      const back = await recallChunks(target, plan.ids);
+      if (back.texts.length) {
+        systemExtra = [...systemExtra, ...back.texts];
+        setMemNotice(
+          `Recalled #${back.refs.map((r) => r.seq).join(", #")} from disk (${formatTokens(
+            back.tokens,
+          )} prompt tokens) — ${plan.why}. It goes back out of the window after this turn.`,
+        );
+      }
+    }
+
+    /* Anything the user pinned by hand rides along too. */
+    if (held.size) {
+      const back = await recallChunks(
+        target,
+        [...held].filter((id) => !plan.ids.includes(id)),
+      );
+      systemExtra = [...systemExtra, ...back.texts];
+    }
+
     return { wire, systemExtra };
   };
 
@@ -1049,14 +1366,14 @@ export function App() {
     setStreamingId(null);
     setDemoNotice(false);
 
-    let wire = unfoldedMessages(history, activeCompaction(target));
+    let wire = messagesAfter(history, cutIdOf(target));
     let systemExtra: string[] = [];
     try {
-      const prepared = await prepareWindow(target, history, userMsg ? [userMsg] : []);
+      const prepared = await prepareWindow(target, history, userMsg ? [userMsg] : [], content);
       wire = prepared.wire;
       systemExtra = prepared.systemExtra;
     } catch (err) {
-      setFoldNotice(`Could not fold the context: ${err instanceof Error ? err.message : String(err)}`);
+      setFoldNotice(`Could not prepare the context: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     const asst: ChatMessage = { id: uid(), role: "assistant", content: "", reasoning: "" };
@@ -1149,16 +1466,19 @@ export function App() {
     prev?.abort();
     setDemoNotice(false);
 
-    let wire = unfoldedMessages(messages.slice(0, idx), activeCompaction(target));
+    let wire = messagesAfter(messages.slice(0, idx), cutIdOf(target));
     let systemExtra: string[] = [];
     try {
-      const prepared = await prepareWindow(target, messages.slice(0, idx), [
-        { ...anchor, role: "assistant" },
-      ]);
+      const prepared = await prepareWindow(
+        target,
+        messages.slice(0, idx),
+        [{ ...anchor, role: "assistant" }],
+        `${anchor.content.slice(-2000)} ${messages[idx - 1]?.content ?? ""}`,
+      );
       wire = prepared.wire;
       systemExtra = prepared.systemExtra;
     } catch (err) {
-      setFoldNotice(`Could not fold the context: ${err instanceof Error ? err.message : String(err)}`);
+      setFoldNotice(`Could not prepare the context: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     const acc = { body: anchor.content, reasoning: anchor.reasoning ?? "" };
@@ -1327,6 +1647,25 @@ export function App() {
         </div>
       )}
 
+      {memNotice && (
+        <div className="banner memory">
+          <span>{memNotice}</span>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => {
+              setRightOpen(true);
+              setInspectorTab("context");
+            }}
+          >
+            memory
+          </button>
+          <button type="button" className="icon-btn" onClick={() => setMemNotice(null)}>
+            dismiss
+          </button>
+        </div>
+      )}
+
       {foldNotice && (
         <div className="banner fold">
           <span>{foldNotice}</span>
@@ -1394,6 +1733,14 @@ export function App() {
           onFold={() => void foldNow()}
           onUnfold={unfold}
           folding={folding}
+          archives={archivedChunks}
+          held={session.held ?? []}
+          memRoot={memRoot}
+          memBusy={memBusy}
+          onPullBack={(id) => void pullBack(id)}
+          onRelease={releaseBack}
+          onForget={(id) => void forgetChunk(id)}
+          onUnarchive={() => void unarchive()}
           usage={usage}
           compactAt={settings.compactAt}
           autoCompact={settings.autoCompact}
@@ -1424,6 +1771,14 @@ export function App() {
             streaming={Boolean(streamingId)}
             pace={pace}
             tick={lastTick}
+            archives={archivedChunks}
+            held={session.held ?? []}
+            memRoot={memRoot}
+            memBusy={memBusy}
+            onPullBack={(id) => void pullBack(id)}
+            onRelease={releaseBack}
+            onForget={(id) => void forgetChunk(id)}
+            onUnarchive={() => void unarchive()}
           />
         )}
       </div>

@@ -1,4 +1,5 @@
 import type {
+  ArchiveRef,
   ChatMessage,
   FinishInfo,
   PromptProgress,
@@ -259,6 +260,58 @@ export async function uploadWorkspaceFile(name: string, content: string) {
     throw new Error(json?.error || `could not save ${name}`);
   }
   return json as { path: string; size: number; renamed?: boolean };
+}
+
+/* ------------------------------------------------------------------ memory
+ * The archive lives on disk, behind the middleware. Every call here is
+ * best-effort by design: if the store is unreachable the caller falls back to
+ * folding, so a workbench on a static host still runs, just without memory.
+ */
+
+export type StoredChunk = ArchiveRef & { body: { messages: ChatMessage[] } };
+
+export async function memoryPut(
+  sessionId: string,
+  chunk: StoredChunk,
+  meta?: Record<string, unknown>,
+): Promise<{ seq: number; chunks: number }> {
+  const res = await fetch("/api/memory/put", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session: sessionId, chunk, meta }),
+  });
+  const json = (await readMaybeJson(res)) as { error?: string; seq?: number; chunks?: number } | null;
+  if (!res.ok || !json || json.error) throw new Error(json?.error || "the memory store refused the chunk");
+  return { seq: json.seq ?? chunk.seq, chunks: json.chunks ?? 0 };
+}
+
+export async function memoryList(sessionId: string): Promise<{ chunks: ArchiveRef[]; root: string }> {
+  const res = await fetch(`/api/memory/list?session=${encodeURIComponent(sessionId)}`);
+  const json = (await readMaybeJson(res)) as { error?: string; chunks?: ArchiveRef[]; root?: string } | null;
+  if (!res.ok || !json || json.error) throw new Error(json?.error || "the memory store could not be listed");
+  return { chunks: json.chunks ?? [], root: json.root ?? "" };
+}
+
+export async function memoryGet(sessionId: string, id: string): Promise<StoredChunk> {
+  const res = await fetch(
+    `/api/memory/chunk?session=${encodeURIComponent(sessionId)}&id=${encodeURIComponent(id)}`,
+  );
+  const json = (await readMaybeJson(res)) as { error?: string; chunk?: StoredChunk } | null;
+  if (!res.ok || !json || json.error || !json.chunk) {
+    throw new Error(json?.error || `chunk ${id} could not be read back`);
+  }
+  return json.chunk;
+}
+
+export async function memoryForget(sessionId: string, ids: string[]): Promise<number> {
+  const res = await fetch("/api/memory/forget", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session: sessionId, ids }),
+  });
+  const json = (await readMaybeJson(res)) as { error?: string; removed?: number } | null;
+  if (!res.ok || !json || json.error) throw new Error(json?.error || "the memory store refused the delete");
+  return json.removed ?? 0;
 }
 
 export async function fetchFile(path: string) {

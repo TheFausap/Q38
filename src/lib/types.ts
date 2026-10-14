@@ -126,6 +126,39 @@ export type Session = {
   messages: ChatMessage[];
   /** context folds, oldest first. The last one is the active brief. */
   compactions?: Compaction[];
+  /** memories moved to disk, oldest first. The last one is the active cut. */
+  archives?: ArchiveRef[];
+  /** chunk ids the user has pinned back into the window by hand. */
+  held?: string[];
+};
+
+/**
+ * A chunk of transcript moved out of the window and onto disk. The session keeps
+ * the ref — one register line and its matching terms; the messages themselves
+ * live in the memory store and come back only when something recalls them.
+ */
+export type ArchiveRef = {
+  id: string;
+  /** 1-based position in this session's archive; what the register line shows. */
+  seq: number;
+  at: number;
+  /** messages moved out, inclusive. They stay in the transcript either way. */
+  fromId: string;
+  toId: string;
+  count: number;
+  /** prompt tokens this chunk cost while it was in the window. */
+  tokens: number;
+  /** the one line that stands in for it. */
+  register: string;
+  /** first user line of the chunk, for the card and the register. */
+  label: string;
+  /** paths mentioned in the chunk, for the card. */
+  paths: string[];
+  /** terms the matcher scores against. */
+  terms: string[];
+  /** how many times it has been pulled back in. */
+  recalls: number;
+  lastRecallAt: number | null;
 };
 
 export type ContinueMode = "auto" | "prefill" | "directive";
