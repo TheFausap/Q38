@@ -7,3 +7,5 @@ dist
 !.env.example
 *.tsbuildinfo
 .vite
+tests/.bundle
+tests/.tmp

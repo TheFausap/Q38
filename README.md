@@ -64,6 +64,7 @@ Vite binds `0.0.0.0:5173`. Long generations (slow GPU, big `xhigh` traces) are s
 | `/api/workspace/file` | read a text file for context pinning |
 | `/api/workspace/upload` | write a dropped file into `WORKSPACE_DIR` |
 | `/api/demo/chat` | SSE demo if the model is offline |
+| `/api/memory/list` `/chunk` `/put` `/forget` | the disk store behind memory (below) |
 
 Point **Setup → llama-server URL** at your server (default `http://127.0.0.1:8080`). The proxy reads `X-Llama-Upstream` per request.
 
@@ -94,6 +95,24 @@ npm start
 ```
 
 Then open the URL it prints — not the old `serve` port.
+
+## Tests
+
+```bash
+npm test           # both suites
+npm run test:unit  # the memory rules, no DOM, no network  (~56 assertions)
+npm run test:ui    # the workbench in jsdom against the real middleware
+```
+
+`tests/memory.test.ts` covers the pure logic: which tokens count as terms (and
+that the injected `{REASON:coder}` tag never does), what a register line says, and
+when a turn has earned a recall. `tests/memory-ui.mjs` builds the whole app, runs
+it in jsdom against `server/api.mjs` and a stub llama-server, and checks the
+behaviour end to end: a full window archives instead of summarising, the register
+— not the bodies — goes out in the prompt, a turn recalls what it needs and an
+unrelated one does not, the model's `recall` tool round-trips, `/recall 3` pins a
+chunk, unarchive brings every message back, and a store that refuses falls back to
+folding. Scratch output lands in `tests/.bundle` and `tests/.tmp`, both ignored.
 
 ## Context: budget, memory, continuation
 
