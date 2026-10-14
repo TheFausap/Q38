@@ -1181,6 +1181,9 @@ export function App() {
         allowAuto: true,
         resuming: true,
       });
+      // a manual resume is still a resume: count it on the message so the
+      // transcript records that this reply was assembled from two rounds
+      patchMessage(target.id, anchor.id, (m) => ({ ...m, continues: (m.continues ?? 0) + 1 }));
     } catch (err) {
       if ((err as Error).name !== "AbortError") {
         const message = err instanceof Error ? err.message : String(err);

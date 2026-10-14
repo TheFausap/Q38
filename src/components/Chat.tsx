@@ -65,16 +65,6 @@ export function Chat({
     if (!active) return -1;
     return session.messages.findIndex((m) => m.id === active.upToId);
   }, [active, session.messages]);
-  const lastAssistantId = useMemo(() => {
-    for (let i = session.messages.length - 1; i >= 0; i--) {
-      if (session.messages[i].role === "assistant") return session.messages[i].id;
-    }
-    return null;
-  }, [session.messages]);
-  const lastAssistant = useMemo(
-    () => session.messages.find((m) => m.id === lastAssistantId),
-    [lastAssistantId, session.messages],
-  );
 
   useEffect(() => {
     const el = scroller.current;
@@ -177,7 +167,6 @@ export function Chat({
                 <MessageView
                   message={m}
                   live={streamingId === m.id}
-                  tip={m.id === lastAssistantId}
                   busy={!!streamingId}
                   onContinue={onContinue}
                 />
@@ -232,22 +221,6 @@ export function Chat({
                 : " · auto-fold off"}
           </span>
           <span className="grow" />
-          {lastAssistant && !streamingId && (
-            <button
-              type="button"
-              className={`btn ${lastAssistant.truncated ? "primary" : ""}`}
-              onClick={() => onContinue(lastAssistant.id)}
-              title={
-                fenceState(lastAssistant.content).open
-                  ? "Resume inside the open code block"
-                  : lastAssistant.truncated
-                    ? "The reply hit max_tokens — resume it"
-                    : "Ask the model to keep going from where it stopped"
-              }
-            >
-              {lastAssistant.truncated ? "continue reply" : "continue"}
-            </button>
-          )}
           {streamingId ? (
             <button type="button" className="btn danger" onClick={onStop}>
               stop
@@ -366,13 +339,11 @@ function peelThink(content: string, reasoning?: string) {
 function MessageView({
   message,
   live,
-  tip,
   busy,
   onContinue,
 }: {
   message: ChatMessage;
   live: boolean;
-  tip: boolean;
   busy: boolean;
   onContinue: (id: string) => void;
 }) {
@@ -397,7 +368,11 @@ function MessageView({
   }
   const peeled = peelThink(message.content, message.reasoning);
   const fence = fenceState(peeled.content);
-  const resumable = !live && (message.truncated || tip);
+  /* Only offer a resume where the reply demonstrably stopped short: the server
+     said max_tokens, or the text ends inside an open code block. A reply that
+     finished cleanly gets no button — "keep going" on a complete answer reads
+     as if something went wrong. */
+  const resumable = !live && (message.truncated || fence.open);
   return (
     <article className={`msg assistant ${live ? "live" : ""}`}>
       <div className="msg-kicker">
@@ -426,16 +401,18 @@ function MessageView({
             disabled={busy}
             onClick={() => onContinue(message.id)}
             title={
-              fence.open
-                ? "Resume inside the open code block — the stub is sent back as a prefill"
-                : "Resume the reply from its last token"
+              message.truncated
+                ? "The reply hit max_tokens — resume it from its last token"
+                : "The reply ends inside an open code block — resume it"
             }
           >
-            {message.truncated ? "continue this reply" : "keep going"}
-            {fence.open ? ` (inside \`\`\`${fence.lang})` : ""}
+            {message.truncated ? "continue this reply" : "finish the code block"}
+            {!message.truncated && fence.open ? ` (inside \`\`\`${fence.lang})` : ""}
           </button>
           <span className="muted tiny">
-            assistant prefill · falls back to a resume directive if the server refuses
+            {message.truncated
+              ? "stopped at max_tokens · the cut-off text goes back as an assistant prefill"
+              : "the reply stops inside an open code block · it resumes from the last token"}
           </span>
         </div>
       )}
