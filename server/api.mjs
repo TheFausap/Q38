@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
+import os from "node:os";
 import path from "node:path";
 
 const SKIP_DIRS = new Set([
@@ -560,6 +561,97 @@ async function statusPayload(req) {
   return result;
 }
 
+/* ------------------------------------------------------------------ memory
+ * Sessions keep their transcripts in the browser; the chunks they no longer
+ * fit in the window live here, on disk, so the window stays small and nothing
+ * is ever paraphrased away. One directory per session:
+ *
+ *   <state>/sessions/<id>/meta.json     title, timestamps, schema
+ *   <state>/sessions/<id>/chunks.ndjson one chunk per line, newest last
+ *
+ * The index (term -> chunk) is derived on every read: a few megabytes at most,
+ * and a derived index cannot drift out of step with the bodies.
+ */
+
+function stateRoot() {
+  const explicit = process.env.Q38_STATE_DIR;
+  if (explicit) return path.resolve(explicit);
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+    return path.join(appData, "q38");
+  }
+  const xdg = process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share");
+  return path.join(xdg, "q38");
+}
+
+/**
+ * Session ids are ours — uuid-shaped — but never trust one into a path: keep the
+ * safe characters, refuse anything that is not a plain name after that (a
+ * "../../etc" would otherwise survive as the directory "....etc").
+ */
+function safeSessionId(id) {
+  const raw = String(id || "");
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(raw)) throw new Error("bad session id");
+  return raw;
+}
+
+function sessionDir(id) {
+  return path.join(stateRoot(), "sessions", safeSessionId(id));
+}
+
+function readChunks(id) {
+  const file = path.join(sessionDir(id), "chunks.ndjson");
+  if (!fs.existsSync(file)) return [];
+  const out = [];
+  for (const line of fs.readFileSync(file, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const chunk = JSON.parse(line);
+      if (chunk && typeof chunk.id === "string") out.push(chunk);
+    } catch {
+      /* a torn line is skipped: the rest of the archive still loads */
+    }
+  }
+  return out;
+}
+
+function writeChunks(id, chunks) {
+  const dir = sessionDir(id);
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, "chunks.ndjson");
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, chunks.map((c) => JSON.stringify(c)).join("\n") + (chunks.length ? "\n" : ""));
+  fs.renameSync(tmp, file);
+  return file;
+}
+
+function readMeta(id) {
+  const file = path.join(sessionDir(id), "meta.json");
+  if (!fs.existsSync(file)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function writeMeta(id, patch) {
+  const dir = sessionDir(id);
+  fs.mkdirSync(dir, { recursive: true });
+  const next = { ...(readMeta(id) || {}), ...patch, id: String(id), at: Date.now(), schema: 1 };
+  fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify(next, null, 2));
+  return next;
+}
+
+/** A ref without the body: what the window and the index need. */
+function refOf(chunk) {
+  const { body, ...ref } = chunk;
+  return ref;
+}
+
+/** Largest chunk the memory store accepts, to keep a runaway turn off the disk. */
+const MEMORY_MAX_BYTES = 4 * 1024 * 1024;
+
 /** Longest drop the workbench will write into ./workspace. */
 const UPLOAD_MAX_BYTES = 8 * 1024 * 1024;
 
@@ -651,6 +743,106 @@ export function createApi() {
         const unique = uniqueName(root, name);
         fs.writeFileSync(path.join(root, unique.name), payload.content, "utf8");
         sendJson(res, 200, { path: unique.name, size: bytes, renamed: unique.renamed });
+        return;
+      }
+
+      if (url.pathname.startsWith("/api/memory")) {
+        /* GET routes name the session in the query; put/forget carry it in the
+           body, so the id is validated where it is actually read. */
+        let session = "";
+        if (req.method === "GET") {
+          try {
+            session = safeSessionId(url.searchParams.get("session") || "");
+          } catch {
+            sendJson(res, 400, { error: "a session id of letters, digits, dash or underscore is required" });
+            return;
+          }
+        }
+        const id = url.searchParams.get("id") || "";
+
+        if (url.pathname === "/api/memory/list" && req.method === "GET") {
+          const chunks = readChunks(session);
+          sendJson(res, 200, {
+            ok: true,
+            session,
+            root: sessionDir(session),
+            meta: readMeta(session),
+            chunks: chunks.map(refOf),
+          });
+          return;
+        }
+
+        if (url.pathname === "/api/memory/chunk" && req.method === "GET") {
+          const chunk = readChunks(session).find((c) => c.id === id);
+          if (!chunk) {
+            sendJson(res, 404, { error: `no chunk ${id} in this session` });
+            return;
+          }
+          sendJson(res, 200, { ok: true, chunk });
+          return;
+        }
+
+        if (url.pathname === "/api/memory/put" && req.method === "POST") {
+          const raw = await readBodyCapped(req, MEMORY_MAX_BYTES);
+          let payload = null;
+          try {
+            payload = JSON.parse(raw.toString("utf8"));
+          } catch {
+            payload = null;
+          }
+          const incoming = payload?.chunk;
+          if (!incoming?.id || !Array.isArray(incoming?.body?.messages)) {
+            sendJson(res, 400, { error: "a chunk with messages is required" });
+            return;
+          }
+          try {
+            safeSessionId(payload.session);
+          } catch {
+            sendJson(res, 400, { error: "a valid session id is required" });
+            return;
+          }
+          const bytes = Buffer.byteLength(JSON.stringify(incoming), "utf8");
+          if (bytes > MEMORY_MAX_BYTES) {
+            sendJson(res, 413, { error: `chunk is ${bytes} bytes, over the ${MEMORY_MAX_BYTES} limit` });
+            return;
+          }
+          const chunks = readChunks(payload.session);
+          const at = chunks.findIndex((c) => c.id === incoming.id);
+          if (at >= 0) chunks[at] = incoming;
+          else chunks.push(incoming);
+          writeChunks(payload.session, chunks);
+          if (payload.meta) writeMeta(payload.session, payload.meta);
+          sendJson(res, 200, { ok: true, seq: incoming.seq, chunks: chunks.length, bytes });
+          return;
+        }
+
+        if (url.pathname === "/api/memory/forget" && req.method === "POST") {
+          const raw = await readBodyCapped(req, 64_000);
+          let payload = null;
+          try {
+            payload = JSON.parse(raw.toString("utf8"));
+          } catch {
+            payload = null;
+          }
+          try {
+            safeSessionId(payload?.session);
+          } catch {
+            sendJson(res, 400, { error: "a valid session id is required" });
+            return;
+          }
+          const ids = new Set(Array.isArray(payload.ids) ? payload.ids : []);
+          const before = readChunks(payload.session);
+          const keep = ids.size ? before.filter((c) => !ids.has(c.id)) : [];
+          writeChunks(payload.session, keep);
+          if (!keep.length) {
+            const dir = sessionDir(payload.session);
+            if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+          }
+          sendJson(res, 200, { ok: true, removed: before.length - keep.length, chunks: keep.length });
+          return;
+        }
+
+        sendJson(res, 404, { error: "unknown memory route" });
         return;
       }
 

@@ -13,7 +13,8 @@ The UI is built around Turbo Brilliance — 27 reasoning constructs, matching in
 - Native `reasoning_effort` (`xhigh` / medium / low / none) plus `enable_thinking`
 - Workspace file tree: pin files into the turn as fenced context (read-only)
 - Session history, regen, stop, syntax-highlighted code with copy/save
-- **Context folding**: older turns are rewritten by the model into one handoff brief before the window fills up
+- **Disk memory**: older turns move to a chunk file off the window and stand in as one exact register line; a turn recalls what it needs, you can pull any chunk back by hand (`/recall 3`), and the model can ask for one itself
+- **Context folding**: the fallback when the store is out of reach, one handoff brief instead of the old turns
 - **Reply continuation**: a reply cut off by `max_tokens` resumes itself, mid-code-block included
 - **Job console**: a punched-card readout for the slow parts — model loading, prompt reading, and weights paging back in after idle
 - KaTeX for LaTeX: `$$...$$`, `$...$`, `\[...\]`, `\(...\)`, and `align`/`equation` environments
@@ -63,6 +64,7 @@ Vite binds `0.0.0.0:5173`. Long generations (slow GPU, big `xhigh` traces) are s
 | `/api/workspace/file` | read a text file for context pinning |
 | `/api/workspace/upload` | write a dropped file into `WORKSPACE_DIR` |
 | `/api/demo/chat` | SSE demo if the model is offline |
+| `/api/memory/list` `/chunk` `/put` `/forget` | the disk store behind memory (below) |
 
 Point **Setup → llama-server URL** at your server (default `http://127.0.0.1:8080`). The proxy reads `X-Llama-Upstream` per request.
 
@@ -94,7 +96,25 @@ npm start
 
 Then open the URL it prints — not the old `serve` port.
 
-## Context: budget, folding, continuation
+## Tests
+
+```bash
+npm test           # both suites
+npm run test:unit  # the memory rules, no DOM, no network  (~56 assertions)
+npm run test:ui    # the workbench in jsdom against the real middleware
+```
+
+`tests/memory.test.ts` covers the pure logic: which tokens count as terms (and
+that the injected `{REASON:coder}` tag never does), what a register line says, and
+when a turn has earned a recall. `tests/memory-ui.mjs` builds the whole app, runs
+it in jsdom against `server/api.mjs` and a stub llama-server, and checks the
+behaviour end to end: a full window archives instead of summarising, the register
+— not the bodies — goes out in the prompt, a turn recalls what it needs and an
+unrelated one does not, the model's `recall` tool round-trips, `/recall 3` pins a
+chunk, unarchive brings every message back, and a store that refuses falls back to
+folding. Scratch output lands in `tests/.bundle` and `tests/.tmp`, both ignored.
+
+## Context: budget, memory, continuation
 
 MAX MTP burns context quickly — 64k is a real session, not a lot of one. The
 workbench measures the window, folds the older turns into a brief, and resumes a
@@ -106,15 +126,47 @@ show prompt tokens against `n_ctx − max_tokens − margin`, split into system 
 briefs and transcript. Estimates assume ~3.6 chars/token; **measure exact** runs the
 live prompt through llama-server's `/tokenize`.
 
-**Folding.** Past the fold line (**fold at**, default 72% of the usable window) the
-older turns are rewritten into a single handoff brief — goal, stack, files in play,
-decisions, state of the work, open threads, snippets that must survive — and sent as
-a system turn ahead of the messages kept verbatim (**keep verbatim**, default 8).
-Folding is skipped when it would not pay for itself (the brief costs more than the
-messages it replaces), and falls back to a mechanical local extract when
-llama-server is unreachable. Nothing is deleted: the fold card in the transcript
-(and every entry in the Context tab) can be **unfolded**, which puts the original
+**Memory: old turns go to disk, not through a summariser.** Past the fold line
+(**fold at**, default 72% of the usable window) the oldest turns are written to a
+chunk file under the OS data dir and their place in the prompt is taken by **one
+register line** — exact, not a paraphrase:
+
+```
+#3 · "wire the retry loop into src/lib/api.ts" · src/lib/api.ts src/lib/retry.ts · 6 msg · 2.1k tok
+```
+
+Nothing is deleted from the transcript and nothing is rewritten, so a chunk can
+always come back word for word. It comes back three ways:
+
+- **On its own.** Before each send the turn is matched against the chunks' own
+  terms (paths, symbols, quoted strings, words) and the closest one or two are
+  read back verbatim. A path, a symbol or a number is evidence on its own; one
+  ordinary word is not. The decision is made once per send, so the prompt prefix
+  stays stable and llama-server's prompt cache survives the turn.
+- **By hand.** The memory card in the transcript and the **Memory** panel in the
+  Context tab list every chunk with **pull back** (it stays in the window until
+  you **let go**), **forget** (delete it from the disk) and **unarchive
+  everything**. `/recall 3` does the same from the composer, without a model call.
+- **By the model.** While something is on disk, turns offer a `recall` tool: the
+  model names a register number or describes what it needs and the chunk comes
+  back verbatim, then the turn is sent again with it in the prompt. Capped at two
+  hops per turn, and visible — transcript, banner and the console tape
+  (`MEMORY: RECALL #3 · 2.1k TOK`). Toggle it in Setup.
+
+Recall has a budget: 12% of the usable window, plus whatever room is free right
+now, capped at half the window — so it can never crowd out the work in front of
+it. Everything recalled is announced; nothing is guessed.
+
+**Folding is now the fallback.** If the store cannot be reached (no `/api` proxy,
+a read-only data dir), the workbench says so and folds instead: the older turns
+are rewritten into a single handoff brief and sent as a system turn. A fold can be
+**unfolded** from the transcript card or the Context tab, which puts the original
 messages back into the window.
+
+The store is plain files — `sessions/<id>/chunks.ndjson`, one chunk per line —
+under `%APPDATA%\q38` on Windows, `$XDG_DATA_HOME/q38` (else
+`~/.local/share/q38`) elsewhere, or `Q38_STATE_DIR` if you set it. Deleting it
+loses nothing that is not still in the transcript.
 
 **Continuation.** When a round stops on `finish_reason: "length"` the reply resumes
 itself, up to **continue rounds** times (default 2, 0 = manual only). Any reply has a
@@ -133,12 +185,13 @@ and code-fence repair, so a half-written ```ts block stays one code block.
 | `fold at` | 0.72 | fraction of the usable window that triggers a fold |
 | `keep verbatim` | 8 | messages below the fold that stay untouched |
 | `brief size` | 1600 | token cap handed to the summariser |
+| `recall tool` | on | let the model read a chunk back mid-reply |
 | `auto-continue` | on | resume truncated replies without asking |
 | `continue rounds` | 2 | automatic resumptions per reply |
 | `continue mode` | auto | `prefill` (trailing assistant message) → `directive` fallback |
 
-In offline demo mode both features still exercise: folding falls back to the local
-extract and the demo stream answers a continuation with more code. With llama-server
+In offline demo mode the archive still runs on the real store, and folding falls
+back to the local extract; the demo stream answers a continuation with more code. With llama-server
 down, a turn streams from the demo stream (badged `demo`) instead of failing with a
 transport error — a refused connection is a reason to fall back, not to lose the turn.
 
@@ -204,6 +257,10 @@ Default construct for this UI is **coder**. Switch family with the Reason / Inst
 - `Escape` stop
 - `⌘/Ctrl + N` new chat
 - `⌘/Ctrl + ,` setup
+
+Slash commands: `/recall 3` reads chunk #3 back off the disk and keeps it in the
+window (same as **pull back** on the memory card); with no number it lists what is
+on disk.
 
 Buttons: **fold** in the stage head, **compact/fold now** + **measure exact** in the
 Context tab, **continue** under any reply and in the composer bar.

@@ -38,6 +38,8 @@ export type PacingView = {
   cold: boolean;
   loadingMs: number | null;
   queuedMs: number;
+  /** the last disk move this job made (recall / archive), shown on the tape */
+  mem?: string | null;
 };
 
 function deckDepth(phase: Phase): number {
@@ -153,6 +155,12 @@ export function JobConsole({
       </div>
 
       <div className="jc-tape">
+        {view.mem && (
+          <div className="jc-line jc-mem">
+            <span className="jc-stamp">{formatClock(view.elapsedMs)}</span>
+            <span className="jc-text">{view.mem}</span>
+          </div>
+        )}
         {lines.map((line, i) => (
           <div key={`${i}-${line}`} className={`jc-line ${i === lines.length - 1 ? "jc-line-live" : ""}`}>
             <span className="jc-stamp">{formatClock(view.elapsedMs)}</span>

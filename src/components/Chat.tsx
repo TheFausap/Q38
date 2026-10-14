@@ -4,7 +4,8 @@ import { familyLabel, modeById, reasonTag } from "../lib/modes";
 import { isBusyPhase } from "../lib/pacing";
 import { JobConsole, type PacingView } from "./Punchcard";
 import { fenceState } from "../lib/summarize";
-import type { Attachment, ChatMessage, Compaction, ModeFamily, Session } from "../lib/types";
+import { ArchiveCard } from "./Memory";
+import type { ArchiveRef, Attachment, ChatMessage, Compaction, ModeFamily, Session } from "../lib/types";
 import { MarkdownView } from "./MarkdownView";
 
 export function Chat({
@@ -23,6 +24,14 @@ export function Chat({
   onFold,
   onUnfold,
   folding,
+  archives,
+  held,
+  memRoot,
+  memBusy,
+  onPullBack,
+  onRelease,
+  onForget,
+  onUnarchive,
   usage,
   compactAt,
   autoCompact,
@@ -46,6 +55,14 @@ export function Chat({
   onFold: () => void;
   onUnfold: (index: number) => void;
   folding: boolean;
+  archives: ArchiveRef[];
+  held: string[];
+  memRoot: string;
+  memBusy: string | null;
+  onPullBack: (id: string) => void;
+  onRelease: (id: string) => void;
+  onForget: (id: string) => void;
+  onUnarchive: () => void;
   usage: ContextUsage;
   compactAt: number;
   autoCompact: boolean;
@@ -61,10 +78,12 @@ export function Chat({
 
   const compactions = useMemo(() => session.compactions ?? [], [session.compactions]);
   const active = compactions.length ? compactions[compactions.length - 1] : undefined;
-  const foldIndex = useMemo(() => {
-    if (!active) return -1;
-    return session.messages.findIndex((m) => m.id === active.upToId);
-  }, [active, session.messages]);
+  /** Where the window starts: the cut is an archive when there is one, else a fold. */
+  const cutIndex = useMemo(() => {
+    const boundary = archives.length ? archives[archives.length - 1].toId : active?.upToId;
+    if (!boundary) return -1;
+    return session.messages.findIndex((m) => m.id === boundary);
+  }, [archives, active, session.messages]);
 
   useEffect(() => {
     const el = scroller.current;
@@ -128,8 +147,8 @@ export function Chat({
       <div className="messages" ref={scroller}>
         {empty && <Empty example={mode.example} tag={tag} onStarter={onStarter} />}
         {session.messages.map((m, i) => {
-          const hidden = foldIndex >= 0 && i <= foldIndex;
-          const card = active && i === foldIndex + 1;
+          const hidden = cutIndex >= 0 && i <= cutIndex;
+          const card = cutIndex >= 0 && i === cutIndex + 1;
           if (hidden && !card) return null;
           // while the job is still being read (or the model is being paged back
           // in) the pending reply is a job console rather than a bare caret
@@ -141,7 +160,7 @@ export function Chat({
             (isBusyPhase(pacing.phase) || pacing.phase === "paging");
           return (
             <div key={m.id}>
-              {card && active && (
+              {card && active && !archives.length && (
                 <FoldCard
                   compaction={active}
                   index={compactions.length - 1}
@@ -149,6 +168,25 @@ export function Chat({
                   disabled={!!streamingId}
                 />
               )}
+              {card && archives.length > 0 && (
+                <ArchiveCard
+                  chunks={archives}
+                  held={held}
+                  root={memRoot}
+                  busy={memBusy}
+                  onPullBack={onPullBack}
+                  onRelease={onRelease}
+                  onForget={onForget}
+                  onUnarchive={onUnarchive}
+                  disabled={!!streamingId}
+                />
+              )}
+              {m.recalled && !hidden ? (
+                <div className="mem-hop">
+                  ⇄ read {m.recalled === 1 ? "a chunk" : `${m.recalled} chunks`} back off the disk
+                  mid-reply
+                </div>
+              ) : null}
               {hidden ? null : jobbed && pacing ? (
                 retro ? (
                   <JobConsole view={pacing} onCancel={onCancelJob} />
