@@ -611,6 +611,14 @@ export function Inspector({
             />
             punched-card job console while reading
           </label>
+          <label className="tiny-check block">
+            <input
+              type="checkbox"
+              checked={settings.recallTool}
+              onChange={(e) => setSetting("recallTool", e.target.checked)}
+            />
+            let the model read a chunk back off the disk mid-reply
+          </label>
           <Slider
             label="cold start after"
             min={15}

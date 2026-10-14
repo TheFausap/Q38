@@ -40,12 +40,16 @@ export type FinishInfo = {
   truncated: boolean;
   /** llama.cpp only: eos | word | limit | none */
   stopType?: string;
+  /** tool calls the model asked for this round (llama-server --jinja). */
+  calls?: { id: string; name: string; arguments: string }[];
 };
 
 export type ChatMessage = {
   id: string;
   role: Role;
   content: string;
+  /** how many times the model went back to the disk mid-reply (recall tool) */
+  recalled?: number;
   reasoning?: string;
   attachments?: Attachment[];
   modeTag?: string;
@@ -190,6 +194,8 @@ export type Settings = {
   coldStartSeconds: number;
   /** decode rate below this fraction of the warm baseline is "paging" */
   pagingFactor: number;
+  /** let the model ask for a chunk off the disk mid-reply (the recall tool) */
+  recallTool: boolean;
 };
 
 export type FileNode = {
@@ -246,4 +252,5 @@ export const DEFAULT_SETTINGS: Settings = {
   retroFeedback: true,
   coldStartSeconds: 120,
   pagingFactor: 0.45,
+  recallTool: true,
 };

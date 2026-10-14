@@ -17,6 +17,8 @@ export type StreamHandlers = {
   onFinish?: (info: FinishInfo) => void;
   /** llama-server's prefill heartbeat, while the prompt is being read. */
   onProgress?: (p: PromptProgress) => void;
+  /** a tool call the model asked for, once its arguments are complete. */
+  onToolCall?: (call: ToolCall) => void;
   /** the server is up but the model is not in memory yet; the job is queued. */
   onServerLoading?: (waitingMs: number) => void;
 };
@@ -29,6 +31,8 @@ export type ChatStreamOptions = {
   modelWaitMs?: number;
   /** compaction briefs injected as system turns, right after the system prompt */
   systemExtra?: string[];
+  /** OpenAI-style tools to offer this turn (llama-server needs --jinja to parse them) */
+  tools?: unknown[];
   /**
    * Continue a trailing assistant message instead of starting a new turn.
    * "content" is the prefill path (llama-server honours it, older builds follow it
@@ -405,12 +409,44 @@ export function buildChatPayload(
     reasoning_effort: sampling.reasoning_effort,
     reasoning_format: "deepseek",
   };
+  if (opts.tools?.length) {
+    payload.tools = opts.tools;
+    payload.tool_choice = "auto";
+  }
   if (opts.continueFinal) {
     // llama-server refuses continue_final_message together with add_generation_prompt.
     payload.continue_final_message = opts.continueFinal;
     payload.add_generation_prompt = false;
   }
   return payload;
+}
+
+/** A tool call the model asked for. Arguments arrive as JSON text, in pieces. */
+export type ToolCall = { id: string; name: string; arguments: string };
+
+/**
+ * llama-server streams tool calls the way OpenAI does: `delta.tool_calls[]`
+ * fragments carrying an index, a name on the first piece, and argument JSON
+ * split across pieces. Only complete calls are reported — a half-written
+ * argument string is never handed to a caller that will JSON.parse it.
+ */
+function readToolDeltas(
+  delta: Record<string, unknown>,
+  open: Map<number, ToolCall>,
+): ToolCall | null {
+  const calls = delta.tool_calls as
+    | { index?: number; id?: string; function?: { name?: string; arguments?: string } }[]
+    | undefined;
+  if (!Array.isArray(calls)) return null;
+  for (const piece of calls) {
+    const index = Number(piece?.index ?? 0);
+    const cur = open.get(index) ?? { id: "", name: "", arguments: "" };
+    if (piece?.id) cur.id = String(piece.id);
+    if (piece?.function?.name) cur.name = String(piece.function.name);
+    if (piece?.function?.arguments) cur.arguments += String(piece.function.arguments);
+    open.set(index, cur);
+  }
+  return null;
 }
 
 function finishOf(json: Record<string, unknown>, current: FinishInfo): FinishInfo {
@@ -441,6 +477,7 @@ async function readSse(
   let demo = res.headers.get("x-q38-demo") === "1";
   let finish: FinishInfo = { reason: "", truncated: false };
   let done = false;
+  const openCalls = new Map<number, ToolCall>();
 
   const consume = (data: string) => {
     if (data === "[DONE]") return true;
@@ -464,16 +501,18 @@ async function readSse(
     const choices = json.choices as
       | { delta?: Record<string, string>; message?: Record<string, string> }[]
       | undefined;
-    const delta = choices?.[0]?.delta;
+    const delta = choices?.[0]?.delta as Record<string, unknown> | undefined;
     const message = choices?.[0]?.message;
+    const str = (v: unknown) => (typeof v === "string" ? v : "");
     const r =
-      delta?.reasoning_content ||
-      delta?.reasoning ||
+      str(delta?.reasoning_content) ||
+      str(delta?.reasoning) ||
       message?.reasoning_content ||
       "";
-    const c = delta?.content || message?.content || "";
+    const c = str(delta?.content) || message?.content || "";
     if (r) handlers.onReasoning(r);
     if (c) handlers.onContent(c);
+    if (delta) readToolDeltas(delta, openCalls);
     if (json.timings && typeof json.timings === "object") {
       handlers.onTimings(json.timings as Timings, { demo });
     }
@@ -501,6 +540,17 @@ async function readSse(
     consume(buf.trim().slice(5).trim());
   }
   if (finish.truncated && !finish.reason) finish.reason = "length";
+  /* The stream is over, so now every argument string is complete. A round that
+     ended in tool_calls carries no prose — the caller runs the tools and sends
+     the turn again. */
+  if (openCalls.size) {
+    const complete = [...openCalls.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([, c]) => c)
+      .filter((c) => c.name);
+    for (const call of complete) handlers.onToolCall?.(call);
+    if (complete.length) finish.calls = complete;
+  }
   handlers.onFinish?.(finish);
   return { demo, finish };
 }

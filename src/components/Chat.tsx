@@ -181,6 +181,12 @@ export function Chat({
                   disabled={!!streamingId}
                 />
               )}
+              {m.recalled && !hidden ? (
+                <div className="mem-hop">
+                  ⇄ read {m.recalled === 1 ? "a chunk" : `${m.recalled} chunks`} back off the disk
+                  mid-reply
+                </div>
+              ) : null}
               {hidden ? null : jobbed && pacing ? (
                 retro ? (
                   <JobConsole view={pacing} onCancel={onCancelJob} />

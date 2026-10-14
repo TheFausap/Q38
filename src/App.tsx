@@ -146,6 +146,43 @@ type FoldOutcome =
 
 const EMPTY_FINISH: FinishInfo = { reason: "", truncated: false };
 
+/**
+ * The one tool the model gets: ask for a chunk back off the disk.
+ *
+ * It is offered only when something is actually on disk, and only the register
+ * lines tell the model what exists. Chunk bodies never enter the prompt unless
+ * this is called (or the turn matched on its own), which is the whole point of
+ * moving them out.
+ */
+const RECALL_TOOL = {
+  type: "function",
+  function: {
+    name: "recall",
+    description:
+      "Read a chunk of earlier conversation back off the disk, verbatim. The context shows " +
+      "register lines like `#3 · \"label\" · src/lib/api.ts · 6 msg · 2.1k tok`: ask for the " +
+      "number when an earlier turn matters and you no longer have it.",
+    parameters: {
+      type: "object",
+      properties: {
+        chunk: {
+          type: "integer",
+          description: "the register number, e.g. 3 for the line that starts with #3",
+        },
+        query: {
+          type: "string",
+          description:
+            "or describe what you need in words and the closest chunk is brought back instead",
+        },
+      },
+      required: [],
+    },
+  },
+};
+
+/** How many times one turn may go and fetch before it has to answer. */
+const MAX_RECALL_HOPS = 2;
+
 /** Where the next text goes when a reply is resumed. */
 export type ContinuePlan = {
   continueFinal: "content" | "reasoning_content" | null;
@@ -175,6 +212,8 @@ export function App() {
   const [modeWarn, setModeWarn] = useState<string | null>(null);
   const [foldNotice, setFoldNotice] = useState<string | null>(null);
   const [memNotice, setMemNotice] = useState<string | null>(null);
+  /** the console tape line for the last disk move (see PacingView.mem) */
+  const [memLine, setMemLine] = useState<string | null>(null);
   const [memBusy, setMemBusy] = useState<string | null>(null);
   const [memRoot, setMemRoot] = useState<string>("");
   const [folding, setFolding] = useState(false);
@@ -197,6 +236,12 @@ export function App() {
   useEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
+
+  /** The session as it is *now* — an async turn must not read a stale memo. */
+  const sessionById = useCallback(
+    (id: string): Session | undefined => sessionsRef.current.find((s) => s.id === id),
+    [],
+  );
 
   useEffect(() => {
     jobRef.current = job;
@@ -340,10 +385,11 @@ export function App() {
       cold: j.cold,
       loadingMs: j.loadingAt != null ? now - j.loadingAt : null,
       queuedMs: j.queuedAckAt ?? 0,
+      mem: memLine,
     };
     // `tick` is the clock that moves this view forward between tokens
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [job, tick, pace.baseline, settings.pagingFactor, jobInput]);
+  }, [job, tick, pace.baseline, settings.pagingFactor, jobInput, memLine]);
 
   /* One source of truth: the same verdict feeds the console, the top-bar pip
      and the pacing stats. The ticker latches "this job paged" for the session. */
@@ -1020,6 +1066,67 @@ export function App() {
     [currentSession],
   );
 
+  /**
+   * The model asked for something back. It either names a register number or
+   * describes what it wants; either way the chunk that comes back is the real
+   * thing, verbatim. Nothing is invented if the request misses.
+   */
+  const recallForTool = useCallback(
+    async (
+      target: Session,
+      calls: { arguments: string }[],
+    ): Promise<string[]> => {
+      const archives = archivesOf(target);
+      if (!archives.length) return [];
+      const ids: string[] = [];
+      const asked: string[] = [];
+      for (const call of calls) {
+        let args: { chunk?: unknown; query?: unknown } = {};
+        try {
+          args = JSON.parse(call.arguments || "{}") as typeof args;
+        } catch {
+          /* a malformed argument is a miss, not a crash */
+        }
+        const seq = Number(args.chunk);
+        if (Number.isFinite(seq)) {
+          const ref = archives.find((r) => r.seq === seq);
+          if (ref) ids.push(ref.id);
+          asked.push(`#${seq}`);
+          continue;
+        }
+        const q = typeof args.query === "string" ? args.query : "";
+        if (q) {
+          const plan = planRecall({
+            query: q,
+            refs: archives.filter((r) => !ids.includes(r.id)),
+            budgetTokens: Number.MAX_SAFE_INTEGER,
+            maxChunks: 1,
+          });
+          if (plan.ids.length) ids.push(...plan.ids);
+          asked.push(`"${q.slice(0, 60)}"`);
+        }
+      }
+      if (!ids.length) {
+        setMemNotice(
+          `The model asked for ${asked.join(", ") || "a chunk"} and nothing on disk matched it.`,
+        );
+        return [];
+      }
+      const back = await recallChunks(target, [...new Set(ids)]);
+      if (!back.texts.length) return [];
+      setMemNotice(
+        `The model read ${back.refs.map((r) => `#${r.seq}`).join(", #")} back off the disk (${formatTokens(
+          back.tokens,
+        )} prompt tokens) — ${asked.join(", ") || "asked for it"}.`,
+      );
+      setMemLine(
+        `MEMORY: RECALL ${back.refs.map((r) => `#${r.seq}`).join(" ")} · ${formatTokens(back.tokens)} · ASKED BY THE MODEL`,
+      );
+      return back.texts;
+    },
+    [archivesOf, recallChunks],
+  );
+
   const measureExact = useCallback(async () => {
     const target = currentSession();
     if (!target) return;
@@ -1045,6 +1152,10 @@ export function App() {
     continueFinal: "content" | "reasoning_content" | null;
     directive?: string;
     fallbackDirective?: string;
+    /** more system turns for this round only (recalled chunks, tool results). */
+    extraSystem?: string[];
+    /** tools offered this round; only the recall tool exists. */
+    tools?: unknown[];
   }): Promise<Round> => {
     const { acc, start } = args;
     const resuming = Boolean(start.body || start.reasoning);
@@ -1119,7 +1230,14 @@ export function App() {
           },
         },
         args.ctrl.signal,
-        { systemExtra: args.systemExtra, continueFinal, directive },
+        {
+          systemExtra: args.extraSystem?.length
+            ? [...args.systemExtra, ...args.extraSystem]
+            : args.systemExtra,
+          continueFinal,
+          directive,
+          tools: args.tools,
+        },
       );
       if (result.demo) setDemoNotice(true);
       if (result.queuedMs > 0) {
@@ -1167,6 +1285,8 @@ export function App() {
     first: ContinuePlan;
     allowAuto: boolean;
     resuming: boolean;
+    extraSystem?: string[];
+    tools?: unknown[];
   }): Promise<Round> => {
     const { acc } = args;
     const assistantMessage = (content: string) =>
@@ -1189,10 +1309,45 @@ export function App() {
         continueFinal: args.first.continueFinal,
         directive: args.first.directive,
         fallbackDirective: args.first.fallbackDirective,
+        extraSystem: args.extraSystem,
+        tools: args.tools,
       });
     } catch (err) {
       endJob();
       throw err;
+    }
+
+    /* The model asked for a chunk off the disk. Fetch it, then send the turn
+       again with it in the prompt — capped, so a confused model cannot loop the
+       machine into a very slow morning. The prose already streamed (if any) is
+       appended to, never thrown away. */
+    let hops = 0;
+    while (
+      !args.ctrl.signal.aborted &&
+      hops < MAX_RECALL_HOPS &&
+      round.finish.calls?.some((c) => c.name === "recall")
+    ) {
+      const wanted = round.finish.calls.filter((c) => c.name === "recall");
+      const session = sessionById(args.sessionId);
+      const texts = session ? await recallForTool(session, wanted) : [];
+      if (!texts.length) break;
+      hops++;
+      round = await runRound({
+        sessionId: args.sessionId,
+        messageId: args.messageId,
+        wire: round.body.trim()
+          ? [...args.wireBefore, assistantMessage(round.body)]
+          : args.wireBefore,
+        systemExtra: args.systemExtra,
+        ctrl: args.ctrl,
+        acc,
+        start: { body: round.body, reasoning: round.reasoning },
+        continueFinal: round.body.trim() ? "content" : args.first.continueFinal,
+        directive: undefined,
+        extraSystem: [...(args.extraSystem ?? []), ...texts],
+        tools: args.tools,
+      });
+      patchMessage(args.sessionId, args.messageId, (m) => ({ ...m, recalled: (m.recalled ?? 0) + 1 }));
     }
 
     let continues = 0;
@@ -1218,6 +1373,8 @@ export function App() {
         continueFinal: step.continueFinal,
         directive: step.directive,
         fallbackDirective: step.fallbackDirective,
+        extraSystem: args.extraSystem,
+        tools: args.tools,
       });
       patchMessage(args.sessionId, args.messageId, (m) => ({ ...m, continues }));
     }
@@ -1260,6 +1417,9 @@ export function App() {
       if (out.ok) {
         wire = out.tail;
         systemExtra = [registerText([...(archived ?? []), out.ref])];
+        setMemLine(
+          `MEMORY: ARCHIVE #${out.ref.seq} · ${formatTokens(out.ref.tokens)} OUT · ${out.ref.count} MSG → DISK`,
+        );
         setMemNotice(
           `Window was at ${formatPct(trigger.pct)} — moved ${out.ref.count} messages (#${out.ref.seq}) to disk as one register line (−${formatTokens(
             out.ref.tokens,
@@ -1307,6 +1467,9 @@ export function App() {
       const back = await recallChunks(target, plan.ids);
       if (back.texts.length) {
         systemExtra = [...systemExtra, ...back.texts];
+        setMemLine(
+          `MEMORY: RECALL ${back.refs.map((r) => `#${r.seq}`).join(" ")} · ${formatTokens(back.tokens)} · MATCHED THE TURN`,
+        );
         setMemNotice(
           `Recalled #${back.refs.map((r) => r.seq).join(", #")} from disk (${formatTokens(
             back.tokens,
@@ -1345,6 +1508,31 @@ export function App() {
       history = cut >= 0 ? history.slice(0, cut + 1) : history.filter((m) => m.role !== "assistant");
     }
 
+    /* /recall 3 — bring chunk #3 back into the window and keep it there. The
+       register line tells you the number; this is the same move as the card's
+       pull back, typed instead of clicked. */
+    const command = /^\/recall\b\s*(\d*)\s*$/.exec(raw);
+    if (command) {
+      const archives = archivesOf(target);
+      const seq = command[1] ? Number(command[1]) : Number.NaN;
+      const ref = archives.find((r) => r.seq === seq);
+      setDraft("");
+      if (!archives.length) {
+        setMemNotice("Nothing is on disk for this session, so there is nothing to recall.");
+      } else if (!ref) {
+        setMemNotice(
+          `No chunk #${command[1] || "?"}. On disk: ${archives
+            .map((r) => `#${r.seq} (${formatTokens(r.tokens)})`)
+            .join(", ")}.`,
+        );
+      } else if ((target.held ?? []).includes(ref.id)) {
+        setMemNotice(`#${ref.seq} is already in the window — it stays until you let it go.`);
+      } else {
+        void pullBack(ref.id);
+      }
+      return;
+    }
+
     const tag = reasonTag(target.family, target.modeId);
     let content = raw;
     if (!regen) {
@@ -1368,10 +1556,14 @@ export function App() {
 
     let wire = messagesAfter(history, cutIdOf(target));
     let systemExtra: string[] = [];
+    let tools: unknown[] | undefined;
     try {
       const prepared = await prepareWindow(target, history, userMsg ? [userMsg] : [], content);
       wire = prepared.wire;
       systemExtra = prepared.systemExtra;
+      /* offer the tool only when there is something on the other end of it */
+      const onDisk = archivesOf(target).length > 0;
+      tools = onDisk && settings.recallTool ? [RECALL_TOOL] : undefined;
     } catch (err) {
       setFoldNotice(`Could not prepare the context: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -1406,6 +1598,7 @@ export function App() {
         first: { continueFinal: null },
         allowAuto: true,
         resuming: false,
+        tools,
       });
     } catch (err) {
       if ((err as Error).name === "AbortError") {

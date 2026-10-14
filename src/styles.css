@@ -754,6 +754,16 @@ button { cursor: pointer; }
 .banner.memory .icon-btn { padding: 3px 8px; font-size: 11px; }
 
 /* The memory card: what is on disk, one register line each. */
+.mem-hop {
+  margin: 10px 0 -4px;
+  padding-left: 2px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: #7fa7c8;
+}
+.jc-line.jc-mem .jc-text { color: #8fc0e6; }
+
 .mem-card {
   margin: 18px 0;
   border: 1px solid #23303a;
