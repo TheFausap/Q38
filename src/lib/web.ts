@@ -195,6 +195,32 @@ export function pageText(out: WebPageOutcome): string {
   ].join("\n");
 }
 
+/**
+ * What is happening *right now*, for the live indicator.
+ *
+ * A search is a few hundred milliseconds of nothing on a fast line and several
+ * seconds on a slow one, and the model has already stopped talking by then — the
+ * turn looks stalled exactly when it is working hardest. These lines are the
+ * ones shown while the request is in flight; the tape lines below describe it
+ * once it is over.
+ */
+export function searchingLine(query: string): string {
+  const q = String(query || "").replace(/\s+/g, " ").trim().slice(0, 60);
+  return `WEB: SEARCHING "${q}"…`;
+}
+
+export function openingLine(host: string): string {
+  return `WEB: OPENING ${String(host || "a page").slice(0, 50)}…`;
+}
+
+/** The same thing in words, for the strip above the composer. */
+export function activeWebText(active: { kind: "search" | "open"; label: string } | null): string {
+  if (!active) return "";
+  return active.kind === "search"
+    ? `searching the web for “${active.label}”`
+    : `reading ${active.label}`;
+}
+
 /** A one-line summary for the console tape. */
 export function searchTapeLine(query: string, out: WebSearchOutcome): string {
   const q = query.replace(/\s+/g, " ").slice(0, 48);

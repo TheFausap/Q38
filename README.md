@@ -120,9 +120,17 @@ The model can look things up while it answers. Two tools, offered on every turn 
 
 A turn that asks for a search gets its results back in the prompt and keeps generating;
 if a snippet is not enough the model can open the page and read it. Both are capped —
-4 searches, 4 page reads, 6 round trips per turn — and both are visible: a badge and a
-`read this turn` list of the pages under the reply, and a line on the job console
-(`WEB: SEARCH "retry timeout helpers" · 2 HITS · SEARX`).
+4 searches, 4 page reads, 6 round trips per turn — and both are visible.
+
+**While it is out**, a strip above the composer says what is happening — *searching the
+web for "retry timeout helpers" · waiting on the network* — and the job console tape
+carries the live line (`WEB: SEARCHING "…"…`). The model has already stopped talking at
+that point, and a search is a blink on a fast line and several seconds on a slow one, so
+without it the turn reads as stalled exactly while it is working hardest.
+
+**Afterwards** the reply keeps the record: a `searched ×1` / `read 1 page` badge, a
+`read this turn` list of the pages it actually opened (linked, in a new tab), and a tape
+line on the console (`WEB: SEARCH "retry timeout helpers" · 2 HITS · SEARX`).
 
 **The providers.** Setup → **provider**:
 

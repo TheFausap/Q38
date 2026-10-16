@@ -41,9 +41,8 @@ const SEARCH_PORT = 8176;
 
 /* ---------------------------------------------------- stub llama-server */
 const calls = [];
-let toolAsksSeen = 0;
-let searchAsksSeen = 0;
-let openAsksSeen = 0;
+/** asks already answered, keyed `<tool>::<the user message that asked>` */
+const answered = new Set();
 const stub = http.createServer((req, res) => {
   const url = new URL(req.url || "/", `http://127.0.0.1:${STUB_PORT}`);
   const json = (body) => {
@@ -72,9 +71,6 @@ const stub = http.createServer((req, res) => {
     const asksForTool = /TOOLPLEASE/.test(newestText);
     const asksToSearch = /SEARCHPLEASE/.test(newestText);
     const asksToOpen = /OPENPLEASE/.test(newestText);
-    if (asksForTool) toolAsksSeen++;
-    if (asksToSearch) searchAsksSeen++;
-    if (asksToOpen) openAsksSeen++;
     const wireText = JSON.stringify(body.messages || []);
     const already = (name) =>
       wireText.includes(name === "recall" ? "### Recalled" : name === "web_search" ? "### Web results" : "### Page:");
@@ -107,16 +103,28 @@ const stub = http.createServer((req, res) => {
       res.end();
     };
 
-    if (asksForTool && toolAsksSeen === 1 && offered("recall")) {
+    /* answer a given ask once per turn: keyed on the user message that asked, so
+       a later turn asking again gets a tool call rather than prose */
+    const sig = (kind) => `${kind}::${newestText}`;
+    if (asksForTool && !answered.has(sig("recall")) && offered("recall")) {
+      answered.add(sig("recall"));
       emit("recall", '{"chunk":1}');
       return;
     }
-    if (asksToSearch && searchAsksSeen === 1 && !already("web_search") && offered("web_search")) {
-      emit("web_search", '{"query":"retry timeout helpers src/lib/api.ts","count":3}');
+    if (asksToSearch && !answered.has(sig("web_search")) && !already("web_search") && offered("web_search")) {
+      answered.add(sig("web_search"));
+      /* search for the user's own words, the way a model would — and pass any
+         "slowpoke" through, which is how the stub is told to dawdle */
+      const query = /slowpoke/.test(newestText)
+        ? "slowpoke retry helpers"
+        : "retry timeout helpers src/lib/api.ts";
+      emit("web_search", JSON.stringify({ query, count: 3 }));
       return;
     }
-    if (asksToOpen && openAsksSeen === 1 && !already("web_fetch") && offered("web_fetch")) {
-      emit("web_fetch", JSON.stringify({ url: `http://127.0.0.1:${SEARCH_PORT}/page` }));
+    if (asksToOpen && !answered.has(sig("web_fetch")) && !already("web_fetch") && offered("web_fetch")) {
+      answered.add(sig("web_fetch"));
+      const slow = /slowopen/.test(newestText) ? "?slow=1" : "";
+      emit("web_fetch", JSON.stringify({ url: `http://127.0.0.1:${SEARCH_PORT}/page${slow}` }));
       return;
     }
 
@@ -136,10 +144,24 @@ await new Promise((r) => stub.listen(STUB_PORT, "127.0.0.1", r));
 
 /* ------------------------------------------------- stub search + page */
 const searchHits = [];
+/** one page, served fast or slow — the tests read the same words either way */
+const PAGE_HTML = `<html><head><title>Retry helpers</title><script>tracker()</script></head><body>
+        <h1>withTimeout</h1><p>withTimeout() arms an AbortSignal and clears it in a finally block,
+        so a slow 503 cannot hold the turn open forever.</p></body></html>`;
 const search = http.createServer((req, res) => {
   const url = new URL(req.url || "/", `http://127.0.0.1:${SEARCH_PORT}`);
   searchHits.push(url.pathname + url.search);
   if (url.pathname === "/search") {
+    /* "slowpoke" makes the search take its time, so a test can see what the
+       workbench says while it is still waiting */
+    const delay = /slowpoke/.test(url.searchParams.get("q") || "") ? 900 : 0;
+    if (delay) {
+      setTimeout(() => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ results: [{ title: "Slow result", url: "https://example.com/slow", content: "took its time" }] }));
+      }, delay);
+      return;
+    }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(
       JSON.stringify({
@@ -156,12 +178,12 @@ const search = http.createServer((req, res) => {
     return;
   }
   if (url.pathname === "/page") {
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    res.end(
-      `<html><head><title>Retry helpers</title><script>tracker()</script></head><body>
-        <h1>withTimeout</h1><p>withTimeout() arms an AbortSignal and clears it in a finally block,
-        so a slow 503 cannot hold the turn open forever.</p></body></html>`,
-    );
+    const send = () => {
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(PAGE_HTML);
+    };
+    if (url.searchParams.get("slow") === "1") setTimeout(send, 700);
+    else send();
     return;
   }
   res.writeHead(404, { "Content-Type": "text/html" });
@@ -302,6 +324,23 @@ async function ask(question) {
     30000,
   );
   await sleep(150);
+}
+
+/** Send, and come back immediately — for watching a turn while it is in flight. */
+async function startAsk(question) {
+  const before = stored().messages.length;
+  await type(question);
+  return async () => {
+    await waitFor("reply started", () => stored().messages.length > before, 30000);
+    await waitFor(
+      "reply landed",
+      () =>
+        stored().messages.length >= before + 2 &&
+        !window.document.querySelector(".msg.assistant.live") &&
+        !window.document.querySelector(".job-pip"),
+      30000,
+    );
+  };
 }
 
 /** Type a slash command and press send: it acts on the spot and sends nothing. */
@@ -453,7 +492,13 @@ try {
 
   /* --- 9. reading the page itself ------------------------------------- */
   const beforeOpen = calls.length;
-  await ask("open that page and read it OPENPLEASE");
+  const openSettle = await startAsk("open that page slowly slowopen and read it OPENPLEASE");
+  const opening = await waitFor("the reading indicator", () => window.document.querySelector(".web-live"), 8000);
+  check(
+    /reading 127\.0\.0\.1/.test(opening.textContent || ""),
+    `while a page is being read, it says which host: ${opening.textContent}`,
+  );
+  await openSettle();
   const openCalls = calls.filter((c) => JSON.stringify(c.messages).includes("OPENPLEASE"));
   check(openCalls.length === 2, `the open turn was sent twice (${openCalls.length})`);
   const opened = JSON.stringify(openCalls[1].messages);
@@ -466,7 +511,25 @@ try {
   check(/Read 127\.0\.0\.1/.test(text(".banner.web")), `the banner names the page: ${text(".banner.web").slice(0, 120)}`);
   check(stored().messages.some((m) => m.opened === 1), "the reply records it");
 
-  /* --- 10. a page the guard refuses ----------------------------------- */
+  /* --- 10. the model says so while it is looking ---------------------- */
+  const settle = await startAsk("look up the slowpoke retry helper SEARCHPLEASE");
+  /* the search is deliberately slow: while it is out, the workbench must say so */
+  const live = await waitFor("the searching indicator", () => window.document.querySelector(".web-live"), 8000);
+  check(
+    /searching the web for “slowpoke/.test(live.textContent || ""),
+    `the composer says what it is doing: ${live.textContent}`,
+  );
+  check(/waiting on the network/.test(live.textContent || ""), "and why the turn has gone quiet");
+  const tape = window.document.querySelector(".jc-line.jc-web.jc-line-live");
+  check(!!tape && /WEB: SEARCHING/.test(tape.textContent || ""), `and the console tape too: ${tape?.textContent || "(none)"}`);
+  await settle();
+  check(
+    !window.document.querySelector(".web-live"),
+    "and it is gone once the answer is in, so it never becomes decoration",
+  );
+  check(/searched ×1/.test(allText()), "the reply keeps the record of it");
+
+  /* --- 11. a page the guard refuses ----------------------------------- */
   delete process.env.Q38_WEB_ALLOW_PRIVATE;
   const guarded = await fetch(`http://127.0.0.1:${MIDDLEWARE_PORT}/api/web/fetch`, {
     method: "POST",
@@ -478,7 +541,7 @@ try {
   check(/only reads public addresses/.test(guardedBody.error), `in plain words: ${guardedBody.error}`);
   process.env.Q38_WEB_ALLOW_PRIVATE = "1";
 
-  /* --- 11. unarchive brings everything back --------------------------- */
+  /* --- 12. unarchive brings everything back --------------------------- */
   const unarchive = byText(/unarchive/);
   check(!!unarchive, "the card offers unarchive");
   /* Unarchive must not drop a single message: 6 seeded + 2 per turn asked. */
@@ -490,7 +553,7 @@ try {
   check(!window.document.querySelector(".mem-card"), "the card is gone");
   check(!fs.existsSync(`${STATE}/sessions/sess-mem-1/chunks.ndjson`), "and the store was cleared with it");
 
-  /* --- 12. a store that refuses falls back to folding, and says so ----- */
+  /* --- 13. a store that refuses falls back to folding, and says so ----- */
   memoryBroken = true;
   await ask("now the long one, tell me everything about the retry loop and the timeout helper and the meter");
   memoryBroken = false;

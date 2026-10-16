@@ -45,9 +45,12 @@ import {
   clampCount,
   dedupeSources,
   fetchTapeLine,
+  hostOf,
+  openingLine,
   pageText,
   searchResultsText,
   searchTapeLine,
+  searchingLine,
   sourceOf,
   type WebPageOutcome,
 } from "./lib/web";
@@ -235,6 +238,8 @@ export function App() {
   /** the console tape line for the last web move (see PacingView.web) */
   const [webLine, setWebLine] = useState<string | null>(null);
   const [webNotice, setWebNotice] = useState<string | null>(null);
+  /** what the model is waiting on right now, if it is waiting on the network */
+  const [webActive, setWebActive] = useState<{ kind: "search" | "open"; label: string } | null>(null);
   const [memBusy, setMemBusy] = useState<string | null>(null);
   const [memRoot, setMemRoot] = useState<string>("");
   const [folding, setFolding] = useState(false);
@@ -408,10 +413,15 @@ export function App() {
       queuedMs: j.queuedAckAt ?? 0,
       mem: memLine,
       web: webLine,
+      webLive: webActive
+        ? webActive.kind === "search"
+          ? searchingLine(webActive.label)
+          : openingLine(webActive.label)
+        : null,
     };
     // `tick` is the clock that moves this view forward between tokens
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [job, tick, pace.baseline, settings.pagingFactor, jobInput, memLine, webLine]);
+  }, [job, tick, pace.baseline, settings.pagingFactor, jobInput, memLine, webLine, webActive]);
 
   /* One source of truth: the same verdict feeds the console, the top-bar pip
      and the pacing stats. The ticker latches "this job paged" for the session. */
@@ -1166,6 +1176,7 @@ export function App() {
           continue;
         }
         const count = clampCount(args.count, settings.webResults);
+        setWebActive({ kind: "search", label: query.replace(/\s+/g, " ").slice(0, 80) });
         const out = await webSearch(query, count, settings);
         texts.push(searchResultsText(query, out, count));
         setWebLine(searchTapeLine(query, out));
@@ -1177,6 +1188,7 @@ export function App() {
             : `The search failed: ${out.error}${out.hint ? ` ${out.hint}` : ""}`,
         );
         for (const hit of out.results ?? []) sources.push(sourceOf(hit.url, hit.title));
+        setWebActive(null);
       }
       return { texts, sources };
     },
@@ -1194,6 +1206,7 @@ export function App() {
           texts.push('### Nothing to open\nThat call had no `url` in it.');
           continue;
         }
+        setWebActive({ kind: "open", label: hostOf(url) });
         const out: WebPageOutcome = await webFetchPage(url, settings.webPageChars, settings);
         texts.push(pageText(out));
         setWebLine(fetchTapeLine(url, out));
@@ -1205,6 +1218,7 @@ export function App() {
             : `Could not read that page: ${out.error}`,
         );
         if (out.ok) sources.push(sourceOf(out.finalUrl || url, out.title));
+        setWebActive(null);
       }
       return { texts, sources };
     },
@@ -1476,6 +1490,7 @@ export function App() {
       const list = dedupeSources(sources);
       patchMessage(args.sessionId, args.messageId, (m) => ({ ...m, sources: list }));
     }
+    setWebActive(null);
 
     let continues = 0;
     for (;;) {
@@ -2068,6 +2083,7 @@ export function App() {
           onFold={() => void foldNow()}
           onUnfold={unfold}
           folding={folding}
+          webActive={webActive}
           archives={archivedChunks}
           held={session.held ?? []}
           memRoot={memRoot}

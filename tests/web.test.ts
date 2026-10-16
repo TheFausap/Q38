@@ -20,6 +20,9 @@ import {
   pageText,
   searchResultsText,
   searchTapeLine,
+  searchingLine,
+  openingLine,
+  activeWebText,
   sourceOf,
 } from "../src/lib/web.ts";
 
@@ -148,6 +151,23 @@ import {
   assert.equal(fetchTapeLine("https://example.com/x", { ok: false, error: "403" }), "WEB: OPEN example.com · FAILED · 403");
   const long = searchTapeLine("x".repeat(200), { ok: true, provider: "brave", results: [] });
   assert.ok(!/\n/.test(long) && long.length < 120, `a tape line stays one short line (${long.length})`);
+}
+
+/* ------------------------------------------------------ live indicator */
+{
+  assert.equal(searchingLine("retry timeout helpers"), 'WEB: SEARCHING "retry timeout helpers"…');
+  assert.equal(
+    searchingLine("  a   query\nwith   space "),
+    'WEB: SEARCHING "a query with space"…',
+    "the live line is flattened",
+  );
+  assert.ok(searchingLine("x".repeat(300)).length < 90, "and stays short enough for one tape row");
+  assert.equal(openingLine("qwen.readthedocs.io"), "WEB: OPENING qwen.readthedocs.io…");
+  assert.equal(openingLine(""), "WEB: OPENING a page…");
+
+  assert.equal(activeWebText({ kind: "search", label: "llama.cpp tools" }), "searching the web for “llama.cpp tools”");
+  assert.equal(activeWebText({ kind: "open", label: "example.com" }), "reading example.com");
+  assert.equal(activeWebText(null), "", "nothing active, nothing said");
 }
 
 /* ----------------------------------------------------------- sources */

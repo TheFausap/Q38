@@ -7,6 +7,7 @@ import { fenceState } from "../lib/summarize";
 import { ArchiveCard } from "./Memory";
 import type { ArchiveRef, Attachment, ChatMessage, Compaction, ModeFamily, Session } from "../lib/types";
 import { MarkdownView } from "./MarkdownView";
+import { activeWebText } from "../lib/web";
 
 export function Chat({
   session,
@@ -24,6 +25,7 @@ export function Chat({
   onFold,
   onUnfold,
   folding,
+  webActive,
   archives,
   held,
   memRoot,
@@ -55,6 +57,7 @@ export function Chat({
   onFold: () => void;
   onUnfold: (index: number) => void;
   folding: boolean;
+  webActive: { kind: "search" | "open"; label: string } | null;
   archives: ArchiveRef[];
   held: string[];
   memRoot: string;
@@ -221,6 +224,15 @@ export function Chat({
 
       <div className="composer">
         {pacing && retro && pacing.phase === "paging" && <JobConsole view={pacing} compact />}
+        {/* The model stopped talking to go and look something up. Without this the
+            turn reads as stalled exactly while it is working hardest. */}
+        {webActive && (
+          <div className="web-live" role="status" aria-live="polite">
+            <span className="web-live-dot" aria-hidden="true" />
+            <span className="web-live-text">{activeWebText(webActive)}</span>
+            <span className="web-live-note">waiting on the network</span>
+          </div>
+        )}
         {attachments.length > 0 && (
           <div className="chips">
             {attachments.map((a) => (
