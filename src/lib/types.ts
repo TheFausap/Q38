@@ -50,6 +50,11 @@ export type ChatMessage = {
   content: string;
   /** how many times the model went back to the disk mid-reply (recall tool) */
   recalled?: number;
+  /** how many searches / page reads this reply cost */
+  searched?: number;
+  opened?: number;
+  /** the pages this reply actually looked at, for the reader's benefit */
+  sources?: { title: string; url: string }[];
   reasoning?: string;
   attachments?: Attachment[];
   modeTag?: string;
@@ -196,7 +201,21 @@ export type Settings = {
   pagingFactor: number;
   /** let the model ask for a chunk off the disk mid-reply (the recall tool) */
   recallTool: boolean;
+  /** let the model search the web and read pages while it answers */
+  webSearch: boolean;
+  /** which search provider to use; "auto" picks from what is configured */
+  webProvider: SearchProvider;
+  /** a SearXNG instance to search through, no key needed */
+  searxUrl: string;
+  /** API key for the keyed providers (Brave, Tavily) */
+  searchApiKey: string;
+  /** results a search may return */
+  webResults: number;
+  /** characters of one page that may enter the prompt */
+  webPageChars: number;
 };
+
+export type SearchProvider = "auto" | "searx" | "brave" | "tavily" | "duckduckgo";
 
 export type FileNode = {
   name: string;
@@ -253,4 +272,10 @@ export const DEFAULT_SETTINGS: Settings = {
   coldStartSeconds: 120,
   pagingFactor: 0.45,
   recallTool: true,
+  webSearch: true,
+  webProvider: "auto",
+  searxUrl: "",
+  searchApiKey: "",
+  webResults: 5,
+  webPageChars: 6000,
 };

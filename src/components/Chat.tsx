@@ -181,10 +181,15 @@ export function Chat({
                   disabled={!!streamingId}
                 />
               )}
-              {m.recalled && !hidden ? (
+              {!hidden && (m.recalled || m.searched || m.opened) ? (
                 <div className="mem-hop">
-                  ⇄ read {m.recalled === 1 ? "a chunk" : `${m.recalled} chunks`} back off the disk
-                  mid-reply
+                  {m.recalled
+                    ? `⇄ read ${m.recalled === 1 ? "a chunk" : `${m.recalled} chunks`} back off the disk`
+                    : ""}
+                  {m.recalled && (m.searched || m.opened) ? " · " : ""}
+                  {m.searched ? `⇄ searched the web ×${m.searched}` : ""}
+                  {m.searched && m.opened ? " · " : ""}
+                  {m.opened ? `⇄ opened ${m.opened} page${m.opened === 1 ? "" : "s"}` : ""}
                 </div>
               ) : null}
               {hidden ? null : jobbed && pacing ? (
@@ -374,6 +379,16 @@ function peelThink(content: string, reasoning?: string) {
   return { reasoning, content };
 }
 
+/** The host of a source, for the chip: the reader cares more about the site
+ *  than about the path, and the whole URL is in the tooltip. */
+function sourceHost(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "link";
+  }
+}
+
 function MessageView({
   message,
   live,
@@ -422,6 +437,8 @@ function MessageView({
             : ""}
         {message.truncated && <span className="badge warn">cut at max_tokens</span>}
         {!!message.continues && <span className="badge">continued ×{message.continues}</span>}
+        {!!message.searched && <span className="badge web">searched ×{message.searched}</span>}
+        {!!message.opened && <span className="badge web">read {message.opened} page{message.opened === 1 ? "" : "s"}</span>}
         {fence.open && !live && peeled.content.trim() && (
           <span className="badge">open ```{fence.lang} block</span>
         )}
@@ -430,6 +447,24 @@ function MessageView({
         <Think text={peeled.reasoning} live={live && !peeled.content} />
       ) : null}
       {peeled.content ? <MarkdownView text={peeled.content} /> : live ? <span className="caret" /> : null}
+      {message.sources && message.sources.length > 0 && (
+        <div className="web-sources">
+          <span className="web-sources-head">read this turn</span>
+          {message.sources.map((source) => (
+            <a
+              key={source.url}
+              className="web-source"
+              href={source.url}
+              target="_blank"
+              rel="noreferrer noopener"
+              title={source.url}
+            >
+              <span className="web-source-host">{sourceHost(source.url)}</span>
+              <span className="web-source-title">{source.title}</span>
+            </a>
+          ))}
+        </div>
+      )}
       {message.error && <div className="err">{message.error}</div>}
       {resumable && (
         <div className="continue-row">

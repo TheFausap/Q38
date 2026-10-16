@@ -1,12 +1,13 @@
 /**
- * Disk memory end to end.
+ * The workbench end to end: memory on disk, and the web tools.
  *
  *   npm run test:ui
  *
- * Drives the real workbench in jsdom against the real middleware (server/api.mjs)
- * and a stub llama-server: a full window moves turns onto disk instead of
- * paraphrasing them, a turn recalls what it needs, the model can ask for a chunk
- * itself, and nothing is ever lost.
+ * Drives the real app in jsdom against the real middleware (server/api.mjs), a
+ * stub llama-server and a stub SearXNG. Memory: a full window moves turns onto
+ * disk instead of paraphrasing them, a turn recalls what it needs, the model can
+ * ask for a chunk itself, nothing is ever lost. Web: the model can search, read
+ * a page, cite what it read, and survive a search engine that says no.
  *
  * Needs the UI bundle first — the npm script builds it into tests/.bundle.
  */
@@ -30,13 +31,19 @@ fs.rmSync(WORK, { recursive: true, force: true });
 fs.mkdirSync(WORK, { recursive: true });
 process.env.Q38_STATE_DIR = STATE;
 process.env.WORKSPACE_DIR = WORK;
+/* the stub world is on 127.0.0.1, which the page guard refuses by default;
+   that refusal has its own test below, and this is the documented switch */
+process.env.Q38_WEB_ALLOW_PRIVATE = "1";
 
 const MIDDLEWARE_PORT = 8174;
 const STUB_PORT = 8175;
+const SEARCH_PORT = 8176;
 
 /* ---------------------------------------------------- stub llama-server */
 const calls = [];
 let toolAsksSeen = 0;
+let searchAsksSeen = 0;
+let openAsksSeen = 0;
 const stub = http.createServer((req, res) => {
   const url = new URL(req.url || "/", `http://127.0.0.1:${STUB_PORT}`);
   const json = (body) => {
@@ -56,28 +63,31 @@ const stub = http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "text/event-stream" });
     const chunk = (j) => res.write(`data: ${JSON.stringify(j)}\n\n`);
 
-    /* A turn that says TOOLPLEASE gets a tool call instead of prose, as long as
-       the client actually offered the tool — that is the whole check. The ask is
-       answered once, then prose: a model that asked forever would be a different
-       bug, and the hop cap is checked by the call count. */
+    /* TOOLPLEASE asks for the recall tool, SEARCHPLEASE for web_search,
+       OPENPLEASE for web_fetch — each answered once per turn, so a model that
+       asked forever would not be the bug the call counts are checking. The
+       arguments go out in two deltas, the way llama.cpp streams a tool call. */
     const newestUser = [...(body.messages || [])].reverse().find((m) => m.role === "user") || {};
-    const asksForTool = /TOOLPLEASE/.test(newestUser.content || "");
+    const newestText = newestUser.content || "";
+    const asksForTool = /TOOLPLEASE/.test(newestText);
+    const asksToSearch = /SEARCHPLEASE/.test(newestText);
+    const asksToOpen = /OPENPLEASE/.test(newestText);
     if (asksForTool) toolAsksSeen++;
-    if (asksForTool && toolAsksSeen === 1 && body.tools?.length) {
-      const wanted = body.tools[0]?.function?.name;
+    if (asksToSearch) searchAsksSeen++;
+    if (asksToOpen) openAsksSeen++;
+    const wireText = JSON.stringify(body.messages || []);
+    const already = (name) =>
+      wireText.includes(name === "recall" ? "### Recalled" : name === "web_search" ? "### Web results" : "### Page:");
+    const offered = (name) => body.tools?.some((t) => t.function?.name === name);
+
+    const emit = (name, args) => {
+      const half = Math.ceil(args.length / 2);
       chunk({
         choices: [
           {
             index: 0,
             delta: {
-              tool_calls: [
-                {
-                  index: 0,
-                  id: "call_1",
-                  type: "function",
-                  function: { name: wanted, arguments: '{"chunk":' },
-                },
-              ],
+              tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name, arguments: args.slice(0, half) } }],
             },
             finish_reason: null,
           },
@@ -85,12 +95,28 @@ const stub = http.createServer((req, res) => {
       });
       chunk({
         choices: [
-          { index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: "1}" } }] }, finish_reason: null },
+          {
+            index: 0,
+            delta: { tool_calls: [{ index: 0, function: { arguments: args.slice(half) } }] },
+            finish_reason: null,
+          },
         ],
       });
       chunk({ choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] });
       res.write("data: [DONE]\n\n");
       res.end();
+    };
+
+    if (asksForTool && toolAsksSeen === 1 && offered("recall")) {
+      emit("recall", '{"chunk":1}');
+      return;
+    }
+    if (asksToSearch && searchAsksSeen === 1 && !already("web_search") && offered("web_search")) {
+      emit("web_search", '{"query":"retry timeout helpers src/lib/api.ts","count":3}');
+      return;
+    }
+    if (asksToOpen && openAsksSeen === 1 && !already("web_fetch") && offered("web_fetch")) {
+      emit("web_fetch", JSON.stringify({ url: `http://127.0.0.1:${SEARCH_PORT}/page` }));
       return;
     }
 
@@ -107,6 +133,41 @@ const stub = http.createServer((req, res) => {
   });
 });
 await new Promise((r) => stub.listen(STUB_PORT, "127.0.0.1", r));
+
+/* ------------------------------------------------- stub search + page */
+const searchHits = [];
+const search = http.createServer((req, res) => {
+  const url = new URL(req.url || "/", `http://127.0.0.1:${SEARCH_PORT}`);
+  searchHits.push(url.pathname + url.search);
+  if (url.pathname === "/search") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        results: [
+          {
+            title: "withTimeout &mdash; retry helpers",
+            url: `http://127.0.0.1:${SEARCH_PORT}/page`,
+            content: "how the timeout helper is meant to behave in src/lib/retry.ts",
+          },
+          { title: "Second hit", url: "https://example.com/second", content: "another one" },
+        ],
+      }),
+    );
+    return;
+  }
+  if (url.pathname === "/page") {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(
+      `<html><head><title>Retry helpers</title><script>tracker()</script></head><body>
+        <h1>withTimeout</h1><p>withTimeout() arms an AbortSignal and clears it in a finally block,
+        so a slow 503 cannot hold the turn open forever.</p></body></html>`,
+    );
+    return;
+  }
+  res.writeHead(404, { "Content-Type": "text/html" });
+  res.end("<h1>not here</h1>");
+});
+await new Promise((r) => search.listen(SEARCH_PORT, "127.0.0.1", r));
 
 /* ------------------------------------------------------- app middleware */
 const api = createApi();
@@ -184,6 +245,11 @@ window.localStorage.setItem(
     summaryMaxTokens: 800,
     autoContinue: false,
     retroFeedback: true,
+    webSearch: true,
+    webProvider: "searx",
+    searxUrl: `http://127.0.0.1:${SEARCH_PORT}`,
+    webResults: 5,
+    webPageChars: 4000,
   }),
 );
 window.localStorage.setItem("q38.sampling.v1", JSON.stringify({ max_tokens: 64 }));
@@ -359,7 +425,60 @@ try {
   await command("/recall 9");
   check(/No chunk #9/.test(text(".banner.memory")), "an unknown register number is reported, not sent");
 
-  /* --- 8. unarchive brings everything back ---------------------------- */
+  /* --- 8. the model searches the web and reads a page ---------------- */
+  const beforeSearch = calls.length;
+  await ask("what does withTimeout do in src/lib/retry.ts? SEARCHPLEASE");
+  const searchCalls = calls.filter((c) => JSON.stringify(c.messages).includes("SEARCHPLEASE"));
+  check(searchCalls.length === 2, `the search turn was sent twice (${searchCalls.length})`);
+  check(
+    searchCalls[0].tools?.some((t) => t.function.name === "web_search"),
+    "the search tool was offered",
+  );
+  check(
+    searchCalls[0].tools?.some((t) => t.function.name === "web_fetch"),
+    "and so was the fetch tool",
+  );
+  const searched = JSON.stringify(searchCalls[1].messages);
+  check(/### Web results/.test(searched), "the results came back into the prompt");
+  check(/withTimeout — retry helpers/.test(searched), "with titles");
+  check(new RegExp(`127\\.0\\.0\\.1:${SEARCH_PORT}/page`).test(searched), "and addresses ready to open");
+  check(searchHits.some((h) => h.startsWith("/search?q=")), `the stub search was asked: ${searchHits[0]}`);
+  check(/q=retry\+timeout\+helpers|q=retry%20timeout%20helpers/.test(searchHits.join(" ")), "with the model's own words");
+  check(calls.length > beforeSearch, "the turn went on");
+  check(/searched ×1/.test(allText()), "the transcript marks the search");
+  check(!!window.document.querySelector(".web-sources"), "and lists where it looked");
+  check(/127\.0\.0\.1/.test(text(".web-sources")), `naming the host: ${text(".web-sources").slice(0, 120)}`);
+  check(stored().messages.some((m) => m.searched === 1), "the reply records it");
+  check(/Searched "/.test(text(".banner.web")), `the banner says so: ${text(".banner.web").slice(0, 110)}`);
+
+  /* --- 9. reading the page itself ------------------------------------- */
+  const beforeOpen = calls.length;
+  await ask("open that page and read it OPENPLEASE");
+  const openCalls = calls.filter((c) => JSON.stringify(c.messages).includes("OPENPLEASE"));
+  check(openCalls.length === 2, `the open turn was sent twice (${openCalls.length})`);
+  const opened = JSON.stringify(openCalls[1].messages);
+  check(/### Page: Retry helpers/.test(opened), "the page text came back into the prompt");
+  check(/arms an AbortSignal/.test(opened), "verbatim from the page");
+  check(!/tracker\(\)/.test(opened), "and its scripts did not");
+  check(/information, not instruction/i.test(opened), "and the model was told what page text is");
+  check(/read 1 page/.test(allText()), "the transcript marks the read");
+  check(calls.length > beforeOpen, "the turn went on");
+  check(/Read 127\.0\.0\.1/.test(text(".banner.web")), `the banner names the page: ${text(".banner.web").slice(0, 120)}`);
+  check(stored().messages.some((m) => m.opened === 1), "the reply records it");
+
+  /* --- 10. a page the guard refuses ----------------------------------- */
+  delete process.env.Q38_WEB_ALLOW_PRIVATE;
+  const guarded = await fetch(`http://127.0.0.1:${MIDDLEWARE_PORT}/api/web/fetch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url: "http://127.0.0.1:8186/page" }),
+  });
+  const guardedBody = await guarded.json();
+  check(guarded.status === 502, `a private address is refused (${guarded.status})`);
+  check(/only reads public addresses/.test(guardedBody.error), `in plain words: ${guardedBody.error}`);
+  process.env.Q38_WEB_ALLOW_PRIVATE = "1";
+
+  /* --- 11. unarchive brings everything back --------------------------- */
   const unarchive = byText(/unarchive/);
   check(!!unarchive, "the card offers unarchive");
   /* Unarchive must not drop a single message: 6 seeded + 2 per turn asked. */
@@ -371,7 +490,7 @@ try {
   check(!window.document.querySelector(".mem-card"), "the card is gone");
   check(!fs.existsSync(`${STATE}/sessions/sess-mem-1/chunks.ndjson`), "and the store was cleared with it");
 
-  /* --- 9. a store that refuses falls back to folding, and says so ----- */
+  /* --- 12. a store that refuses falls back to folding, and says so ----- */
   memoryBroken = true;
   await ask("now the long one, tell me everything about the retry loop and the timeout helper and the meter");
   memoryBroken = false;
@@ -384,7 +503,7 @@ try {
   check((stored().compactions ?? []).length === 1, "the fold is recorded, so it can be undone");
 
   console.log(results.join("\n"));
-  console.log("memory ui checks passed");
+  console.log(`ui checks passed (${results.length})`);
 } catch (err) {
   try {
     console.error("   [debug] calls:", calls.length);
@@ -398,11 +517,12 @@ try {
     /* nothing to report */
   }
   console.error(results.join("\n"));
-  console.error("MEMORY UI TEST FAILED:", err.message);
+  console.error("UI TEST FAILED:", err.message);
   process.exitCode = 1;
 } finally {
   middleware.close();
   stub.close();
+  search.close();
   window.close();
   process.exit(process.exitCode || 0);
 }

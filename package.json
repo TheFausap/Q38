@@ -10,9 +10,10 @@
     "preview": "vite preview --host 0.0.0.0 --port 5173",
     "start": "node server/prod.mjs",
     "serve": "node server/prod.mjs",
-    "test": "npm run test:unit && npm run test:ui",
-    "test:unit": "node --no-warnings --experimental-strip-types tests/memory.test.ts",
-    "test:ui": "vite build --config tests/vite.ui-test.config.ts --ssr tests/ui-test-entry.tsx --logLevel warn && node tests/memory-ui.mjs"
+    "test": "npm run test:unit && npm run test:server && npm run test:ui",
+    "test:unit": "node --no-warnings --experimental-strip-types tests/memory.test.ts && node --no-warnings --experimental-strip-types tests/web.test.ts",
+    "test:server": "node tests/web-routes.mjs",
+    "test:ui": "vite build --config tests/vite.ui-test.config.ts --ssr tests/ui-test-entry.tsx --logLevel warn && node tests/ui.mjs"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.3.0",

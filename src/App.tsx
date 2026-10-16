@@ -8,13 +8,15 @@ import {
   countTokens,
   fetchFile,
   fetchStatus,
+  fetchTree,
   memoryForget,
   memoryGet,
   memoryList,
   memoryPut,
-  uploadWorkspaceFile,
-  fetchTree,
   streamChat,
+  uploadWorkspaceFile,
+  webFetchPage,
+  webSearch,
 } from "./lib/api";
 import {
   activeCompaction,
@@ -33,6 +35,22 @@ import {
   type ContextUsage,
 } from "./lib/context";
 import { modeById, reasonTag } from "./lib/modes";
+import {
+  MAX_TOOL_HOPS,
+  WEB_MAX_CHARS,
+  WEB_MAX_FETCHES_PER_TURN,
+  WEB_MAX_SEARCHES_PER_TURN,
+  WEB_TOOLS,
+  argsOf,
+  clampCount,
+  dedupeSources,
+  fetchTapeLine,
+  pageText,
+  searchResultsText,
+  searchTapeLine,
+  sourceOf,
+  type WebPageOutcome,
+} from "./lib/web";
 import {
   RECALL_BUDGET_FRACTION,
   describeChunk,
@@ -214,6 +232,9 @@ export function App() {
   const [memNotice, setMemNotice] = useState<string | null>(null);
   /** the console tape line for the last disk move (see PacingView.mem) */
   const [memLine, setMemLine] = useState<string | null>(null);
+  /** the console tape line for the last web move (see PacingView.web) */
+  const [webLine, setWebLine] = useState<string | null>(null);
+  const [webNotice, setWebNotice] = useState<string | null>(null);
   const [memBusy, setMemBusy] = useState<string | null>(null);
   const [memRoot, setMemRoot] = useState<string>("");
   const [folding, setFolding] = useState(false);
@@ -386,10 +407,11 @@ export function App() {
       loadingMs: j.loadingAt != null ? now - j.loadingAt : null,
       queuedMs: j.queuedAckAt ?? 0,
       mem: memLine,
+      web: webLine,
     };
     // `tick` is the clock that moves this view forward between tokens
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [job, tick, pace.baseline, settings.pagingFactor, jobInput, memLine]);
+  }, [job, tick, pace.baseline, settings.pagingFactor, jobInput, memLine, webLine]);
 
   /* One source of truth: the same verdict feeds the console, the top-bar pip
      and the pacing stats. The ticker latches "this job paged" for the session. */
@@ -1127,6 +1149,68 @@ export function App() {
     [archivesOf, recallChunks],
   );
 
+  /**
+   * The model asked the web something. Each call goes out through the workbench's
+   * middleware, and what comes back is written for a prompt — a miss included,
+   * because a search that fails is information too.
+   */
+  const webForTool = useCallback(
+    async (calls: { arguments: string }[]) => {
+      const texts: string[] = [];
+      const sources: { title: string; url: string }[] = [];
+      for (const call of calls) {
+        const args = argsOf(call.arguments);
+        const query = String(args.query ?? "").trim();
+        if (!query) {
+          texts.push('### Web search skipped\nThe call had no query in it. Ask again with a `query`.');
+          continue;
+        }
+        const count = clampCount(args.count, settings.webResults);
+        const out = await webSearch(query, count, settings);
+        texts.push(searchResultsText(query, out, count));
+        setWebLine(searchTapeLine(query, out));
+        setWebNotice(
+          out.ok
+            ? `Searched "${query.slice(0, 70)}" — ${out.results?.length ?? 0} results from ${out.provider}${
+                out.ms ? ` in ${Math.round(out.ms)}ms` : ""
+              }.`
+            : `The search failed: ${out.error}${out.hint ? ` ${out.hint}` : ""}`,
+        );
+        for (const hit of out.results ?? []) sources.push(sourceOf(hit.url, hit.title));
+      }
+      return { texts, sources };
+    },
+    [settings],
+  );
+
+  /** The model asked to read one page. */
+  const webPageForTool = useCallback(
+    async (calls: { arguments: string }[]) => {
+      const texts: string[] = [];
+      const sources: { title: string; url: string }[] = [];
+      for (const call of calls) {
+        const url = String(argsOf(call.arguments).url ?? "").trim();
+        if (!url) {
+          texts.push('### Nothing to open\nThat call had no `url` in it.');
+          continue;
+        }
+        const out: WebPageOutcome = await webFetchPage(url, settings.webPageChars, settings);
+        texts.push(pageText(out));
+        setWebLine(fetchTapeLine(url, out));
+        setWebNotice(
+          out.ok
+            ? `Read ${out.host}${new URL(out.finalUrl || url).pathname.slice(0, 60)} — ${out.chars} characters${
+                out.truncated ? " (cut to the budget)" : ""
+              }.`
+            : `Could not read that page: ${out.error}`,
+        );
+        if (out.ok) sources.push(sourceOf(out.finalUrl || url, out.title));
+      }
+      return { texts, sources };
+    },
+    [settings],
+  );
+
   const measureExact = useCallback(async () => {
     const target = currentSession();
     if (!target) return;
@@ -1317,20 +1401,54 @@ export function App() {
       throw err;
     }
 
-    /* The model asked for a chunk off the disk. Fetch it, then send the turn
-       again with it in the prompt — capped, so a confused model cannot loop the
-       machine into a very slow morning. The prose already streamed (if any) is
+    /* The model asked for something it cannot reach from here — a chunk off the
+       disk, a search, a page. Fetch it, then send the turn again with it in the
+       prompt. Capped per tool and in total, so a confused model cannot loop the
+       machine into a very slow morning; the prose already streamed (if any) is
        appended to, never thrown away. */
     let hops = 0;
-    while (
-      !args.ctrl.signal.aborted &&
-      hops < MAX_RECALL_HOPS &&
-      round.finish.calls?.some((c) => c.name === "recall")
-    ) {
-      const wanted = round.finish.calls.filter((c) => c.name === "recall");
+    let recalls = 0;
+    let searches = 0;
+    let fetches = 0;
+    const sources: { title: string; url: string }[] = [];
+    while (!args.ctrl.signal.aborted && hops < MAX_TOOL_HOPS) {
+      const called = round.finish.calls ?? [];
+      const recallCalls =
+        recalls < MAX_RECALL_HOPS ? called.filter((c) => c.name === "recall") : [];
+      const searchCalls =
+        searches < WEB_MAX_SEARCHES_PER_TURN ? called.filter((c) => c.name === "web_search") : [];
+      const fetchCalls =
+        fetches < WEB_MAX_FETCHES_PER_TURN ? called.filter((c) => c.name === "web_fetch") : [];
+      if (!recallCalls.length && !searchCalls.length && !fetchCalls.length) break;
+
       const session = sessionById(args.sessionId);
-      const texts = session ? await recallForTool(session, wanted) : [];
+      const texts: string[] = [];
+      let hopSources: { title: string; url: string }[] = [];
+      let didRecall = 0;
+
+      if (recallCalls.length && session) {
+        const back = await recallForTool(session, recallCalls);
+        texts.push(...back);
+        if (back.length) {
+          recalls++;
+          didRecall = 1;
+        }
+      }
+      if (searchCalls.length) {
+        const found = await webForTool(searchCalls);
+        texts.push(...found.texts);
+        hopSources = [...hopSources, ...found.sources];
+        searches += searchCalls.length;
+      }
+      if (fetchCalls.length && !args.ctrl.signal.aborted) {
+        const read = await webPageForTool(fetchCalls);
+        texts.push(...read.texts);
+        hopSources = [...hopSources, ...read.sources];
+        fetches += fetchCalls.length;
+      }
       if (!texts.length) break;
+
+      sources.push(...hopSources);
       hops++;
       round = await runRound({
         sessionId: args.sessionId,
@@ -1347,7 +1465,16 @@ export function App() {
         extraSystem: [...(args.extraSystem ?? []), ...texts],
         tools: args.tools,
       });
-      patchMessage(args.sessionId, args.messageId, (m) => ({ ...m, recalled: (m.recalled ?? 0) + 1 }));
+      patchMessage(args.sessionId, args.messageId, (m) => ({
+        ...m,
+        recalled: (m.recalled ?? 0) + didRecall,
+        searched: (m.searched ?? 0) + searchCalls.length,
+        opened: (m.opened ?? 0) + fetchCalls.length,
+      }));
+    }
+    if (sources.length) {
+      const list = dedupeSources(sources);
+      patchMessage(args.sessionId, args.messageId, (m) => ({ ...m, sources: list }));
     }
 
     let continues = 0;
@@ -1561,9 +1688,12 @@ export function App() {
       const prepared = await prepareWindow(target, history, userMsg ? [userMsg] : [], content);
       wire = prepared.wire;
       systemExtra = prepared.systemExtra;
-      /* offer the tool only when there is something on the other end of it */
+      /* offer each tool only when there is something on the other end of it */
       const onDisk = archivesOf(target).length > 0;
-      tools = onDisk && settings.recallTool ? [RECALL_TOOL] : undefined;
+      const offered: unknown[] = [];
+      if (onDisk && settings.recallTool) offered.push(RECALL_TOOL);
+      if (settings.webSearch) offered.push(...WEB_TOOLS);
+      tools = offered.length ? offered : undefined;
     } catch (err) {
       setFoldNotice(`Could not prepare the context: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -1840,6 +1970,18 @@ export function App() {
         </div>
       )}
 
+      {webNotice && (
+        <div className="banner web">
+          <span>{webNotice}</span>
+          <button type="button" className="icon-btn" onClick={() => setSettingsOpen(true)}>
+            setup
+          </button>
+          <button type="button" className="icon-btn" onClick={() => setWebNotice(null)}>
+            dismiss
+          </button>
+        </div>
+      )}
+
       {memNotice && (
         <div className="banner memory">
           <span>{memNotice}</span>
@@ -2063,6 +2205,80 @@ function SettingsModal({
             onChange={(e) => onChange({ ...settings, systemPrompt: e.target.value })}
           />
         </label>
+        <div className="group-label">Web search</div>
+        <p className="hint">
+          The model can search and read pages while it answers, through this machine. DuckDuckGo
+          needs nothing; a SearXNG instance or an API key is steadier. Pages on this machine or this
+          network are refused unless <code>Q38_WEB_ALLOW_PRIVATE=1</code> — a page can never read
+          your disks, only its own words can enter the prompt.
+        </p>
+        <label className="tiny-check block">
+          <input
+            type="checkbox"
+            checked={settings.webSearch}
+            onChange={(e) => onChange({ ...settings, webSearch: e.target.checked })}
+          />
+          let the model search the web and read pages
+        </label>
+        <label className="field">
+          <span>provider</span>
+          <select
+            value={settings.webProvider}
+            onChange={(e) => onChange({ ...settings, webProvider: e.target.value as Settings["webProvider"] })}
+          >
+            <option value="auto">auto — SearXNG → key → DuckDuckGo</option>
+            <option value="duckduckgo">DuckDuckGo (no key)</option>
+            <option value="searx">SearXNG (your instance, no key)</option>
+            <option value="brave">Brave Search (API key)</option>
+            <option value="tavily">Tavily (API key)</option>
+          </select>
+        </label>
+        <label className="field">
+          <span>SearXNG URL (if you run one)</span>
+          <input
+            value={settings.searxUrl}
+            onChange={(e) => onChange({ ...settings, searxUrl: e.target.value })}
+            placeholder="http://127.0.0.1:8888"
+          />
+        </label>
+        <label className="field">
+          <span>search API key (Brave or Tavily)</span>
+          <input
+            value={settings.searchApiKey}
+            onChange={(e) => onChange({ ...settings, searchApiKey: e.target.value })}
+            placeholder="optional"
+          />
+        </label>
+        <div className="modal-row">
+          <label className="field">
+            <span>results per search</span>
+            <input
+              type="number"
+              min={1}
+              max={8}
+              value={settings.webResults}
+              onChange={(e) =>
+                onChange({ ...settings, webResults: Math.max(1, Math.min(8, Number(e.target.value) || 5)) })
+              }
+            />
+          </label>
+          <label className="field">
+            <span>characters per page</span>
+            <input
+              type="number"
+              min={1000}
+              max={16000}
+              step={500}
+              value={settings.webPageChars}
+              onChange={(e) =>
+                onChange({
+                  ...settings,
+                  webPageChars: Math.max(1000, Math.min(WEB_MAX_CHARS, Number(e.target.value) || 6000)),
+                })
+              }
+            />
+          </label>
+        </div>
         <div className="modal-actions">
           <button
             type="button"

@@ -1,3 +1,4 @@
+import dns from "node:dns";
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
@@ -655,6 +656,475 @@ const MEMORY_MAX_BYTES = 4 * 1024 * 1024;
 /** Longest drop the workbench will write into ./workspace. */
 const UPLOAD_MAX_BYTES = 8 * 1024 * 1024;
 
+/* ------------------------------------------------------------------ web */
+/**
+ * Search and page reading for the model's tools.
+ *
+ * A tool the model calls has to survive the real web: an API that wants a key it
+ * has not got, a result that is a PDF, a host that never answers. Every failure
+ * below comes back as something the model can read and work around — never as a
+ * broken turn.
+ *
+ * Providers, and what `auto` tries in order:
+ *   searx       your own instance, no key            (Setup / Q38_SEARX_URL)
+ *   brave       api.search.brave.com, key required   (Setup / Q38_SEARCH_KEY)
+ *   tavily      api.tavily.com, key required
+ *   duckduckgo  the keyless HTML endpoint, no promises
+ */
+
+const WEB_TIMEOUT_MS = 15_000;
+const WEB_MAX_BYTES = 512 * 1024;
+const WEB_MAX_REDIRECTS = 3;
+/** No page is read from an address only this machine can reach unless asked. */
+const WEB_USER_AGENT =
+  "Q38-workbench/1.0 (local coding bench; reads pages for its own model)";
+
+const SEARCH_PROVIDERS = ["auto", "searx", "brave", "tavily", "duckduckgo"];
+
+/** Which provider a request will use, before anyone has tried it. */
+export function pickProvider({ provider, key, searxUrl } = {}) {
+  const want = String(provider || "auto").trim().toLowerCase();
+  if (want && want !== "auto") return SEARCH_PROVIDERS.includes(want) ? want : "duckduckgo";
+  if (searxUrl) return "searx";
+  if (key) return "brave";
+  return "duckduckgo";
+}
+
+const ENTITIES = {
+  amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", "#39": "'",
+  "#x27": "'", mdash: "—", ndash: "–", hellip: "…", rsquo: "’", lsquo: "‘",
+  ldquo: "“", rdquo: "”", middot: "·", times: "×", deg: "°", euro: "€",
+};
+
+function decodeEntities(text) {
+  return text
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => {
+      const code = Number.parseInt(hex, 16);
+      return Number.isFinite(code) && code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : "";
+    })
+    .replace(/&#(\d+);/g, (_, dec) => {
+      const code = Number.parseInt(dec, 10);
+      return Number.isFinite(code) && code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : "";
+    })
+    .replace(/&([a-z#0-9x]+);/gi, (m, name) => ENTITIES[name.toLowerCase()] ?? m);
+}
+
+/** The page as something worth putting in a prompt: no markup, no scripts. */
+export function htmlToText(html) {
+  const stripped = String(html || "")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<(script|style|noscript|template|svg|canvas)[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<(script|style|noscript|template)[^>]*\/?>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|li|ul|ol|tr|h[1-6]|section|article|header|footer|blockquote|pre|table)>/gi, "\n")
+    .replace(/<[^>]+>/g, " ");
+  return decodeEntities(stripped)
+    .replace(/[ \t\f\v\u00a0]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/** The <title>, or the first heading, as a fallback. */
+export function titleOf(html) {
+  const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(String(html || ""));
+  if (title) {
+    const text = htmlToText(title[1]);
+    if (text) return text.slice(0, 200);
+  }
+  const heading = /<h1[^>]*>([\s\S]*?)<\/h1>/i.exec(String(html || ""));
+  return heading ? htmlToText(heading[1]).slice(0, 200) : "";
+}
+
+/** DuckDuckGo hides the real address behind its own redirect. */
+export function decodeDdgUrl(href) {
+  const raw = String(href || "").trim();
+  if (!raw) return "";
+  const withScheme = raw.startsWith("//") ? `https:${raw}` : raw;
+  try {
+    const url = new URL(withScheme, "https://duckduckgo.com");
+    const target = url.searchParams.get("uddg");
+    if (target) return target;
+    if (/(^|\.)duckduckgo\.com$/.test(url.hostname)) return "";
+    return url.toString();
+  } catch {
+    return "";
+  }
+}
+
+/** The href of an opening tag, whatever order its attributes came in. */
+function hrefOf(attrs) {
+  return /href=['"]([^'"]*)['"]/i.exec(String(attrs || ""))?.[1] || "";
+}
+
+/**
+ * Every element whose opening tag carries `className`, with its own text.
+ *
+ * Attribute order is not ours to assume: DuckDuckGo has served
+ * `<a class="result__a" href=…>` and `<a href=… class="result-link">` at
+ * different times, and a parser that insists on one silently returns nothing
+ * for the other.
+ */
+function elementsWithClass(src, className) {
+  const out = [];
+  const open = new RegExp(`<([a-z][a-z0-9]*)\\b[^>]*class=['"][^'"]*${className}[^'"]*['"][^>]*>`, "gi");
+  for (const m of src.matchAll(open)) {
+    const tag = m[1];
+    const rest = src.slice((m.index || 0) + m[0].length);
+    const end = rest.search(new RegExp(`</${tag}\\s*>`, "i"));
+    out.push({ attrs: m[0], text: end < 0 ? rest.slice(0, 3000) : rest.slice(0, end) });
+  }
+  return out;
+}
+
+/** The html.duckduckgo.com layout. */
+export function parseDuckHtml(html) {
+  const src = String(html || "");
+  const titles = elementsWithClass(src, "result__a");
+  const snippets = elementsWithClass(src, "result__snippet");
+  return titles.map((t, i) => ({
+    title: htmlToText(t.text),
+    url: decodeDdgUrl(hrefOf(t.attrs)),
+    snippet: htmlToText(snippets[i]?.text || ""),
+  }));
+}
+
+/** The lite.duckduckgo.com layout, for when the html page is not served. */
+export function parseDuckLite(html) {
+  const src = String(html || "");
+  const titles = elementsWithClass(src, "result-link");
+  const snippets = elementsWithClass(src, "result-snippet");
+  return titles.map((t, i) => ({
+    title: htmlToText(t.text),
+    url: decodeDdgUrl(hrefOf(t.attrs)),
+    snippet: htmlToText(snippets[i]?.text || ""),
+  }));
+}
+
+export function parseSearxJson(json) {
+  const list = Array.isArray(json?.results) ? json.results : [];
+  return list.map((r) => ({
+    title: String(r?.title || ""),
+    url: String(r?.url || ""),
+    snippet: String(r?.content || r?.snippet || ""),
+  }));
+}
+
+export function parseBraveJson(json) {
+  const list = Array.isArray(json?.web?.results) ? json.web.results : [];
+  return list.map((r) => ({
+    title: String(r?.title || ""),
+    url: String(r?.url || ""),
+    snippet: String(r?.description || ""),
+  }));
+}
+
+export function parseTavilyJson(json) {
+  const list = Array.isArray(json?.results) ? json.results : [];
+  return list.map((r) => ({
+    title: String(r?.title || ""),
+    url: String(r?.url || ""),
+    snippet: String(r?.content || ""),
+  }));
+}
+
+/** One shape for every provider, with the junk taken out. */
+function tidyResults(list, count) {
+  const out = [];
+  const seen = new Set();
+  for (const item of list || []) {
+    const url = String(item?.url || "").trim();
+    const title = decodeEntities(String(item?.title || "").replace(/\s+/g, " ")).trim();
+    const snippet = decodeEntities(String(item?.snippet || "").replace(/\s+/g, " ")).trim();
+    if (!/^https?:\/\//i.test(url) || seen.has(url)) continue;
+    seen.add(url);
+    out.push({ title: title || url, url, snippet: snippet.slice(0, 400) });
+    if (out.length >= count) break;
+  }
+  return out;
+}
+
+/** Read a response body, but never more than `limit` bytes of it. */
+async function readCapped(res, limit = WEB_MAX_BYTES) {
+  if (!res.body) return { text: await res.text(), truncated: false };
+  const reader = res.body.getReader();
+  const chunks = [];
+  let size = 0;
+  let truncated = false;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    size += value.length;
+    if (size > limit) {
+      chunks.push(value.subarray(0, Math.max(0, limit - (size - value.length))));
+      truncated = true;
+      await reader.cancel().catch(() => {});
+      break;
+    }
+    chunks.push(value);
+  }
+  return { text: Buffer.concat(chunks).toString("utf8"), truncated };
+}
+
+function withTimeout(ms = WEB_TIMEOUT_MS) {
+  return AbortSignal.timeout ? AbortSignal.timeout(ms) : undefined;
+}
+
+/** "fetch failed" is undici's way of saying nothing at all: name the host. */
+function transportReason(err) {
+  const reason = err instanceof Error ? err.message : String(err);
+  if (/timeout|abort/i.test(reason)) return `did not answer within ${Math.round(WEB_TIMEOUT_MS / 1000)}s`;
+  if (/fetch failed|enotfound|eai_again|econnrefused|econnreset|ehostunreach|enetunreach|socket hang up/i.test(reason)) {
+    return "no route to it from this machine";
+  }
+  return reason;
+}
+
+function hostOfTarget(target) {
+  try {
+    return new URL(String(target)).hostname;
+  } catch {
+    return String(target).slice(0, 60);
+  }
+}
+
+/** fetch, but a transport failure comes back as a sentence worth reading. */
+async function webFetch(target, init) {
+  try {
+    return await fetch(target, init);
+  } catch (err) {
+    throw new Error(`could not reach ${hostOfTarget(target)}: ${transportReason(err)}`);
+  }
+}
+
+async function readJsonResponse(res) {
+  const { text } = await readCapped(res, 256 * 1024);
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`the provider answered with something that is not JSON (${res.status})`);
+  }
+}
+
+/** The actual search, one provider at a time. Throws with a readable reason. */
+export async function searchWeb({ query, count = 5, provider, key, searxUrl } = {}) {
+  const chosen = pickProvider({ provider, key, searxUrl });
+  const started = Date.now();
+  const signal = withTimeout();
+  const n = Math.max(1, Math.min(10, Math.round(Number(count) || 5)));
+
+  if (chosen === "searx") {
+    const base = String(searxUrl || "").trim().replace(/\/+$/, "");
+    if (!base) throw new Error("no SearXNG URL is set");
+    const withScheme = /^https?:\/\//i.test(base) ? base : `http://${base}`;
+    const target = `${withScheme}/search?q=${encodeURIComponent(query)}&format=json&safesearch=0`;
+    const res = await webFetch(target, { headers: { Accept: "application/json", "User-Agent": WEB_USER_AGENT }, signal });
+    if (!res.ok) {
+      throw new Error(
+        `SearXNG answered ${res.status}${res.status === 403 ? " (its settings.json needs format: [html, json])" : ""}`,
+      );
+    }
+    return {
+      provider: chosen,
+      ms: Date.now() - started,
+      results: tidyResults(parseSearxJson(await readJsonResponse(res)), n),
+    };
+  }
+
+  if (chosen === "brave") {
+    if (!key) throw new Error("no Brave Search API key is set");
+    const target = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${n}`;
+    const res = await webFetch(target, {
+      headers: { Accept: "application/json", "X-Subscription-Token": key, "User-Agent": WEB_USER_AGENT },
+      signal,
+    });
+    if (!res.ok) throw new Error(`Brave Search answered ${res.status}${res.status === 401 ? " (check the API key)" : ""}`);
+    return {
+      provider: chosen,
+      ms: Date.now() - started,
+      results: tidyResults(parseBraveJson(await readJsonResponse(res)), n),
+    };
+  }
+
+  if (chosen === "tavily") {
+    if (!key) throw new Error("no Tavily API key is set");
+    const res = await webFetch("https://api.tavily.com/search", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Authorization: `Bearer ${key}`,
+        "User-Agent": WEB_USER_AGENT,
+      },
+      body: JSON.stringify({ api_key: key, query, max_results: n, search_depth: "basic", include_answer: false }),
+      signal,
+    });
+    if (!res.ok) throw new Error(`Tavily answered ${res.status}${res.status === 401 ? " (check the API key)" : ""}`);
+    return {
+      provider: chosen,
+      ms: Date.now() - started,
+      results: tidyResults(parseTavilyJson(await readJsonResponse(res)), n),
+    };
+  }
+
+  // duckduckgo: two layouts, whichever answers today
+  const headers = {
+    Accept: "text/html,application/xhtml+xml",
+    "User-Agent":
+      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Accept-Language": "en-US,en;q=0.9",
+  };
+  let lastNote = "";
+  for (const [host, parse] of [
+    ["https://html.duckduckgo.com/html/", parseDuckHtml],
+    ["https://lite.duckduckgo.com/lite/", parseDuckLite],
+  ]) {
+    let res;
+    try {
+      res = await webFetch(`${host}?q=${encodeURIComponent(query)}`, { headers, signal });
+    } catch (err) {
+      lastNote = err instanceof Error ? err.message : String(err);
+      continue;
+    }
+    if (!res.ok) {
+      lastNote = `${new URL(host).hostname} answered ${res.status}`;
+      continue;
+    }
+    const { text } = await readCapped(res, 512 * 1024);
+    const results = tidyResults(parse(text), n);
+    if (results.length) return { provider: chosen, ms: Date.now() - started, results };
+    lastNote = `${new URL(host).hostname} returned no results`;
+  }
+  throw new Error(`DuckDuckGo did not answer with results (${lastNote})`);
+}
+
+/* ---------------------------------------------------------- page fetch */
+
+function ipIsPrivate(host) {
+  const ip = host.replace(/^\[|\]$/g, "").toLowerCase();
+  if (ip.includes(":")) {
+    if (ip === "::" || ip === "::1") return true;
+    if (/^f[cd][0-9a-f]{2}:/.test(ip)) return true; // fc00::/7
+    if (/^fe[89ab][0-9a-f]:/.test(ip)) return true; // fe80::/10
+    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(ip);
+    if (mapped) return ipIsPrivate(mapped[1]);
+    return false;
+  }
+  const parts = ip.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) return false;
+  const [a, b] = parts;
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true; // carrier NAT
+  return false;
+}
+
+/** Hosts only this machine (or this network) can reach. */
+export function isPrivateHost(hostname) {
+  const host = String(hostname || "").toLowerCase().replace(/\.$/, "");
+  if (!host) return true;
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+  if (host.endsWith(".local") || host.endsWith(".internal") || host.endsWith(".home.arpa")) return true;
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(host) || host.includes(":")) return ipIsPrivate(host);
+  return false;
+}
+
+/** A URL the model may read, or the reason it may not. */
+export function validateFetchUrl(raw) {
+  let url;
+  try {
+    url = new URL(String(raw || "").trim());
+  } catch {
+    return { ok: false, error: "that is not a URL I can open" };
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return { ok: false, error: `only http and https can be read, not ${url.protocol.replace(":", "")}` };
+  }
+  if (url.username || url.password) {
+    return { ok: false, error: "URLs with credentials in them are not opened" };
+  }
+  if (!url.hostname) return { ok: false, error: "that URL has no host" };
+  if (process.env.Q38_WEB_ALLOW_PRIVATE !== "1" && isPrivateHost(url.hostname)) {
+    return {
+      ok: false,
+      error: `${url.hostname} is on this machine or this network, and the workbench only reads public addresses (Q38_WEB_ALLOW_PRIVATE=1 overrides)`,
+    };
+  }
+  return { ok: true, url };
+}
+
+/** Belt and braces: a public name that resolves into the private range. */
+async function resolvesIntoPrivate(hostname) {
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname) || hostname.includes(":")) return false;
+  try {
+    const found = await dns.promises.lookup(hostname, { all: true, verbatim: true });
+    return found.some((entry) => ipIsPrivate(String(entry.address || "")));
+  } catch {
+    return false; // let the fetch itself report the bad name
+  }
+}
+
+const TEXTUAL_TYPES = [
+  "text/html", "text/plain", "text/markdown", "application/xhtml+xml",
+  "application/json", "application/xml", "text/xml",
+];
+
+/** Open a public page and hand back something worth reading in a prompt. */
+export async function fetchPage(raw, { chars = 6000 } = {}) {
+  const checked = validateFetchUrl(raw);
+  if (!checked.ok) return { ok: false, ...checked };
+  const started = Date.now();
+  const limit = Math.max(500, Math.min(20_000, Math.round(Number(chars) || 6000)));
+  const signal = withTimeout();
+  const headers = { Accept: "text/html,application/xhtml+xml,text/plain,application/json", "User-Agent": WEB_USER_AGENT };
+
+  let current = checked.url;
+  for (let hop = 0; hop <= WEB_MAX_REDIRECTS; hop++) {
+    if (process.env.Q38_WEB_ALLOW_PRIVATE !== "1" && (await resolvesIntoPrivate(current.hostname))) {
+      return { ok: false, error: `${current.hostname} resolves to a private address, so it is not read` };
+    }
+    let res;
+    try {
+      res = await fetch(current, { redirect: "manual", headers, signal });
+    } catch (err) {
+      return { ok: false, error: `could not reach ${current.hostname}: ${transportReason(err)}` };
+    }
+    if (res.status >= 300 && res.status < 400) {
+      const where = res.headers.get("location");
+      if (!where) return { ok: false, error: `${current.hostname} answered ${res.status} without telling me where to go` };
+      const next = validateFetchUrl(new URL(where, current).toString());
+      if (!next.ok) return { ok: false, error: `the redirect goes somewhere I will not follow: ${next.error}` };
+      current = next.url;
+      continue;
+    }
+    if (!res.ok) return { ok: false, error: `${current.hostname} answered ${res.status}` };
+
+    const type = (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    if (type && !TEXTUAL_TYPES.includes(type)) {
+      return { ok: false, error: `that is ${type}, and only text pages can be read` };
+    }
+    const { text: rawText, truncated: bytesTrimmed } = await readCapped(res);
+    const isHtml = type.includes("html") || /<html|<body|<p[\s>]/i.test(rawText.slice(0, 2000));
+    const full = isHtml ? htmlToText(rawText) : rawText.trim();
+    const text = full.slice(0, limit);
+    return {
+      ok: true,
+      url: checked.url.toString(),
+      finalUrl: current.toString(),
+      host: current.hostname,
+      title: isHtml ? titleOf(rawText) : "",
+      text,
+      chars: text.length,
+      totalChars: full.length,
+      truncated: bytesTrimmed || full.length > text.length,
+      ms: Date.now() - started,
+    };
+  }
+  return { ok: false, error: `too many redirects (more than ${WEB_MAX_REDIRECTS})` };
+}
+
 export function createApi() {
   return async function q38Api(req, res, next) {
     const host = req.headers.host || "localhost";
@@ -843,6 +1313,71 @@ export function createApi() {
         }
 
         sendJson(res, 404, { error: "unknown memory route" });
+        return;
+      }
+
+      if (url.pathname === "/api/web/search" && req.method === "POST") {
+        const raw = await readBody(req);
+        let payload = null;
+        try {
+          payload = JSON.parse(raw.toString("utf8") || "{}");
+        } catch {
+          sendJson(res, 400, { ok: false, error: "the request body is not JSON" });
+          return;
+        }
+        const query = String(payload?.query ?? "").trim();
+        if (!query) {
+          sendJson(res, 400, { ok: false, error: "a search needs a query" });
+          return;
+        }
+        /* The provider and its key come from Setup through headers, the same way
+           the llama-server URL does; the environment is the fallback. */
+        const opts = {
+          query,
+          count: payload?.count,
+          provider: payload?.provider || req.headers["x-q38-search-provider"] || process.env.Q38_SEARCH_PROVIDER,
+          key: payload?.key || req.headers["x-q38-search-key"] || process.env.Q38_SEARCH_KEY,
+          searxUrl: payload?.searxUrl || req.headers["x-q38-searx-url"] || process.env.Q38_SEARX_URL,
+        };
+        const provider = pickProvider(opts);
+        try {
+          const out = await searchWeb(opts);
+          sendJson(res, 200, { ok: true, query, ...out });
+        } catch (err) {
+          sendJson(res, 502, {
+            ok: false,
+            provider,
+            query,
+            error: err instanceof Error ? err.message : String(err),
+            hint:
+              provider === "duckduckgo"
+                ? "DuckDuckGo is keyless and unreliable; a SearXNG URL or an API key in Setup is steadier."
+                : "check the provider settings in Setup",
+          });
+        }
+        return;
+      }
+
+      if (url.pathname === "/api/web/fetch" && req.method === "POST") {
+        const raw = await readBody(req);
+        let payload = null;
+        try {
+          payload = JSON.parse(raw.toString("utf8") || "{}");
+        } catch {
+          sendJson(res, 400, { ok: false, error: "the request body is not JSON" });
+          return;
+        }
+        const target = String(payload?.url ?? "").trim();
+        if (!target) {
+          sendJson(res, 400, { ok: false, error: "which page?" });
+          return;
+        }
+        const out = await fetchPage(target, { chars: payload?.chars });
+        if (!out.ok) {
+          sendJson(res, 502, out);
+          return;
+        }
+        sendJson(res, 200, out);
         return;
       }
 

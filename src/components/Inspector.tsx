@@ -619,6 +619,25 @@ export function Inspector({
             />
             let the model read a chunk back off the disk mid-reply
           </label>
+          <label className="tiny-check block">
+            <input
+              type="checkbox"
+              checked={settings.webSearch}
+              onChange={(e) => setSetting("webSearch", e.target.checked)}
+            />
+            let the model search the web and read pages
+          </label>
+          <p className="hint tiny">
+            Provider: <strong>{settings.webProvider}</strong>
+            {settings.webProvider === "auto"
+              ? settings.searxUrl
+                ? " → your SearXNG"
+                : settings.searchApiKey
+                  ? " → your API key"
+                  : " → DuckDuckGo (keyless)"
+              : ""}
+            . Tools need llama-server <code>--jinja</code>; a SearXNG URL or a key is set in Setup.
+          </p>
           <Slider
             label="cold start after"
             min={15}

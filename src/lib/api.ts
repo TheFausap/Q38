@@ -8,6 +8,7 @@ import type {
   Settings,
   Timings,
 } from "./types";
+import type { WebPageOutcome, WebSearchOutcome } from "./web";
 
 export type StreamHandlers = {
   onReasoning: (chunk: string) => void;
@@ -596,6 +597,61 @@ async function openChatStream(
     }
     return null;
   }
+}
+
+/**
+ * Search the web / read a page, through the workbench's own middleware.
+ *
+ * The middleware is where the network lives: it holds the provider choice (a
+ * SearXNG URL or an API key from Setup), refuses to open private addresses, and
+ * answers a failed search as a *result* — `ok:false` with a reason — rather than
+ * as a broken request. A tool the model called must never take the turn down
+ * with it, so nothing in here throws over the network.
+ */
+async function postWeb(path: string, body: unknown, settings: Settings, extra?: Record<string, string>) {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "X-Q38-Search-Provider": settings.webProvider,
+    ...extra,
+  };
+  if (settings.searchApiKey) headers["X-Q38-Search-Key"] = settings.searchApiKey;
+  if (settings.searxUrl) headers["X-Q38-Searx-Url"] = settings.searxUrl;
+  try {
+    const res = await fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
+    const text = await res.text();
+    try {
+      const json = JSON.parse(text) as Record<string, unknown>;
+      return json;
+    } catch {
+      return { ok: false, error: `the workbench answered ${res.status} with something that is not JSON` };
+    }
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      error: /failed to fetch|fetch failed|networkerror|unreachable/i.test(reason)
+        ? "the workbench server is not answering (is `npm run dev` still up?)"
+        : reason,
+    };
+  }
+}
+
+export async function webSearch(
+  query: string,
+  count: number,
+  settings: Settings,
+): Promise<WebSearchOutcome> {
+  const json = await postWeb("/api/web/search", { query, count }, settings);
+  return json as unknown as WebSearchOutcome;
+}
+
+export async function webFetchPage(
+  url: string,
+  chars: number,
+  settings: Settings,
+): Promise<WebPageOutcome> {
+  const json = await postWeb("/api/web/fetch", { url, chars }, settings);
+  return json as unknown as WebPageOutcome;
 }
 
 /** How the job got on: a normal round, or a demo stream because nothing answered. */
