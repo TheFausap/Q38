@@ -1425,6 +1425,9 @@ export function App() {
     let searches = 0;
     let fetches = 0;
     const sources: { title: string; url: string }[] = [];
+    /* Every tool result of this turn, in order. Each hop's round must see all
+       of them, not only the latest hop's, or the model loses what it read. */
+    const gathered: string[] = [];
     while (!args.ctrl.signal.aborted && hops < MAX_TOOL_HOPS) {
       const called = round.finish.calls ?? [];
       const recallCalls =
@@ -1463,6 +1466,7 @@ export function App() {
       if (!texts.length) break;
 
       sources.push(...hopSources);
+      gathered.push(...texts);
       hops++;
       round = await runRound({
         sessionId: args.sessionId,
@@ -1476,7 +1480,7 @@ export function App() {
         start: { body: round.body, reasoning: round.reasoning },
         continueFinal: round.body.trim() ? "content" : args.first.continueFinal,
         directive: undefined,
-        extraSystem: [...(args.extraSystem ?? []), ...texts],
+        extraSystem: [...(args.extraSystem ?? []), ...gathered],
         tools: args.tools,
       });
       patchMessage(args.sessionId, args.messageId, (m) => ({
@@ -1485,6 +1489,33 @@ export function App() {
         searched: (m.searched ?? 0) + searchCalls.length,
         opened: (m.opened ?? 0) + fetchCalls.length,
       }));
+    }
+    /* The loop ends on a budget, not on the model being done: if the last
+       round still asked for a tool, it streamed only a preamble ("let me look
+       further…") and never answered. Give it one last round with no tools on
+       offer and everything it read, so the turn ends with an answer. */
+    if (!args.ctrl.signal.aborted && round.finish.calls?.length) {
+      round = await runRound({
+        sessionId: args.sessionId,
+        messageId: args.messageId,
+        wire: round.body.trim()
+          ? [...args.wireBefore, assistantMessage(round.body)]
+          : args.wireBefore,
+        systemExtra: args.systemExtra,
+        ctrl: args.ctrl,
+        acc,
+        start: { body: round.body, reasoning: round.reasoning },
+        continueFinal: round.body.trim() ? "content" : args.first.continueFinal,
+        directive: undefined,
+        extraSystem: [
+          ...(args.extraSystem ?? []),
+          ...gathered,
+          "The search and reading budget for this turn is used up and no tools are available now. " +
+            "Answer the user's request in full from the results above; say plainly if something " +
+            "could not be confirmed.",
+        ],
+        tools: undefined,
+      });
     }
     if (sources.length) {
       const list = dedupeSources(sources);
