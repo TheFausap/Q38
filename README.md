@@ -14,6 +14,7 @@ The UI is built around Turbo Brilliance — 27 reasoning constructs, matching in
 - Workspace file tree: pin files into the turn as fenced context (read-only)
 - Session history, regen, stop, syntax-highlighted code with copy/save
 - **Disk memory**: older turns move to a chunk file off the window and stand in as one exact register line; a turn recalls what it needs, you can pull any chunk back by hand (`/recall 3`), and the model can ask for one itself
+- **Web search the model drives itself**: `web_search` / `web_fetch` tools, capped and sourced, keyless by default
 - **Context folding**: the fallback when the store is out of reach, one handoff brief instead of the old turns
 - **Reply continuation**: a reply cut off by `max_tokens` resumes itself, mid-code-block included
 - **Job console**: a punched-card readout for the slow parts — model loading, prompt reading, and weights paging back in after idle
@@ -46,6 +47,15 @@ Notes from the model card:
 
 If your llama.cpp is older and rejects `--spec-type`, drop that flag. The GGUF still runs; you just lose the built-in draft head.
 
+### Tools on the server side
+
+The workbench's tools — the archive `recall`, and `web_search` / `web_fetch` — are **client-side**: the workbench sends an OpenAI `tools` array, the model asks for one, and the workbench does the work. llama-server only has to parse the model's tool call, and that is what `--jinja` is for:
+
+- **`--jinja`** — use the chat template inside the GGUF, which is what knows the model's tool-call delimiters. It is in the launch line above. Recent builds default it on (`--no-jinja` turns it off); older ones need it spelled out. Without it, llama-server ignores the `tools` array and the model describes the call in prose instead of making one.
+- **A tool-aware template is required, not just the flag.** Check `http://127.0.0.1:8080/props` — the model should report `chat_template_tool_use`. If a model's template has no tool support (some quants ship without it), point `--chat-template-file` at one that does, or fall back to `--chat-template chatml`.
+- **`--tools` / `--agent` are a different thing and you do not want them here.** Those enable *llama-server's own* built-in tools (`read_file`, `write_file`, `grep_search`, `exec_shell_command`, …) for its web UI. They are not needed for the workbench's tools, they expose file and shell access over the API, and llama.cpp's own README says not to enable them in an untrusted environment.
+- `parallel_tool_calls` (in the request) is off by default and only supported by some templates; the workbench asks for one call at a time, which every tool-aware model handles.
+
 ## Run the workbench
 
 ```bash
@@ -65,6 +75,8 @@ Vite binds `0.0.0.0:5173`. Long generations (slow GPU, big `xhigh` traces) are s
 | `/api/workspace/upload` | write a dropped file into `WORKSPACE_DIR` |
 | `/api/demo/chat` | SSE demo if the model is offline |
 | `/api/memory/list` `/chunk` `/put` `/forget` | the disk store behind memory (below) |
+| `/api/web/search` | a web search through the configured provider |
+| `/api/web/fetch` | open one public page and return its text |
 
 Point **Setup → llama-server URL** at your server (default `http://127.0.0.1:8080`). The proxy reads `X-Llama-Upstream` per request.
 
@@ -96,23 +108,84 @@ npm start
 
 Then open the URL it prints — not the old `serve` port.
 
+## Web search
+
+The model can look things up while it answers. Two tools, offered on every turn while
+**search the web** is on in Setup:
+
+| Tool | What it does |
+| --- | --- |
+| `web_search(query, count?)` | returns titles, addresses and snippets — not the pages themselves |
+| `web_fetch(url)` | opens one public page and returns its text, scripts and markup stripped |
+
+A turn that asks for a search gets its results back in the prompt and keeps generating;
+if a snippet is not enough the model can open the page and read it. Both are capped —
+4 searches, 4 page reads, 6 round trips per turn — and both are visible.
+
+**While it is out**, a strip above the composer says what is happening — *searching the
+web for "retry timeout helpers" · waiting on the network* — and the job console tape
+carries the live line (`WEB: SEARCHING "…"…`). The model has already stopped talking at
+that point, and a search is a blink on a fast line and several seconds on a slow one, so
+without it the turn reads as stalled exactly while it is working hardest.
+
+**Afterwards** the reply keeps the record: a `searched ×1` / `read 1 page` badge, a
+`read this turn` list of the pages it actually opened (linked, in a new tab), and a tape
+line on the console (`WEB: SEARCH "retry timeout helpers" · 2 HITS · SEARX`).
+
+**The providers.** Setup → **provider**:
+
+| Provider | Key | Notes |
+| --- | --- | --- |
+| `duckduckgo` | none | the HTML endpoint; it is free because it is not an API, so it can rate-limit or change its markup |
+| `searx` | none | your own instance; it must allow JSON output (`format: [html, json]` in its `settings.yml`), or it answers 403 with that hint |
+| `brave` | Brave Search API | `api.search.brave.com`, 2 000 free queries a month |
+| `tavily` | Tavily API | built for this; a few hundred free calls a month |
+
+`auto` uses a SearXNG URL if one is set, else an API key, else DuckDuckGo. The same
+values can come from the environment (`Q38_SEARCH_PROVIDER`, `Q38_SEARCH_KEY`,
+`Q38_SEARX_URL`) for a headless start. A search that fails is not a broken turn: the
+model is told what went wrong and answers from what it has — the console says
+`WEB: SEARCH "…" · FAILED · DUCKDUCKGO REFUSED 429`, and the banner names the fix.
+
+**What it will not do.** Only `http` and `https`, only text pages, only public
+addresses: `localhost`, `10.x`, `192.168.x`, `169.254.169.254` and anything that
+*resolves* into those ranges is refused before a socket opens, redirects are re-checked
+at each hop, and a page is read with a byte cap and a 15 s timeout. So the model cannot
+use the tool to read your files, your router, or your cloud metadata — that is what the
+workspace tree is for. Page text enters the prompt quoted and labelled as information
+rather than instruction, because a page is not a person. Set `Q38_WEB_ALLOW_PRIVATE=1`
+if you really do want it reading your intranet.
+
+Settings live in Setup: provider, SearXNG URL, API key, results per search (1–8),
+characters per page (1 000–16 000).
+
 ## Tests
 
 ```bash
-npm test           # both suites
-npm run test:unit  # the memory rules, no DOM, no network  (~56 assertions)
-npm run test:ui    # the workbench in jsdom against the real middleware
+npm test             # everything
+npm run test:unit    # pure logic: memory rules + web tool text  (no DOM, no network)
+npm run test:server  # the web routes over real HTTP against stub providers
+npm run test:ui      # the whole workbench in jsdom, against a stub model
 ```
 
-`tests/memory.test.ts` covers the pure logic: which tokens count as terms (and
-that the injected `{REASON:coder}` tag never does), what a register line says, and
-when a turn has earned a recall. `tests/memory-ui.mjs` builds the whole app, runs
-it in jsdom against `server/api.mjs` and a stub llama-server, and checks the
-behaviour end to end: a full window archives instead of summarising, the register
-— not the bodies — goes out in the prompt, a turn recalls what it needs and an
-unrelated one does not, the model's `recall` tool round-trips, `/recall 3` pins a
-chunk, unarchive brings every message back, and a store that refuses falls back to
-folding. Scratch output lands in `tests/.bundle` and `tests/.tmp`, both ignored.
+- `tests/memory.test.ts` — which tokens count as terms (and that the injected
+  `{REASON:coder}` tag never does), what a register line says, when a turn has earned
+  a recall.
+- `tests/web.test.ts` — the tool schemas the model is offered, argument parsing,
+  and the exact text a search result, a page and a failure turn into.
+- `tests/web-routes.mjs` — the server half over real HTTP: DuckDuckGo and SearXNG
+  markup parsed from fixtures, a search round trip against a stub SearXNG, the
+  private-address guard (both sides of it), redirect following and loops, content-type
+  refusals, byte and character caps.
+- `tests/ui.mjs` — the whole app in jsdom against `server/api.mjs`, a stub
+  llama-server and a stub SearXNG: a full window archives instead of summarising, the
+  register (not the bodies) goes out in the prompt, a turn recalls what it needs and an
+  unrelated one does not, the model's `recall` tool round-trips, `/recall 3` pins a
+  chunk, the model searches and then opens a page and the reply carries its sources, a
+  private address is refused on demand, unarchive brings every message back, and a
+  store that refuses falls back to folding.
+
+Scratch output lands in `tests/.bundle` and `tests/.tmp`, both ignored.
 
 ## Context: budget, memory, continuation
 

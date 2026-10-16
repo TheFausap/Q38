@@ -7,6 +7,7 @@ import { fenceState } from "../lib/summarize";
 import { ArchiveCard } from "./Memory";
 import type { ArchiveRef, Attachment, ChatMessage, Compaction, ModeFamily, Session } from "../lib/types";
 import { MarkdownView } from "./MarkdownView";
+import { activeWebText } from "../lib/web";
 
 export function Chat({
   session,
@@ -24,6 +25,7 @@ export function Chat({
   onFold,
   onUnfold,
   folding,
+  webActive,
   archives,
   held,
   memRoot,
@@ -55,6 +57,7 @@ export function Chat({
   onFold: () => void;
   onUnfold: (index: number) => void;
   folding: boolean;
+  webActive: { kind: "search" | "open"; label: string } | null;
   archives: ArchiveRef[];
   held: string[];
   memRoot: string;
@@ -181,10 +184,15 @@ export function Chat({
                   disabled={!!streamingId}
                 />
               )}
-              {m.recalled && !hidden ? (
+              {!hidden && (m.recalled || m.searched || m.opened) ? (
                 <div className="mem-hop">
-                  ⇄ read {m.recalled === 1 ? "a chunk" : `${m.recalled} chunks`} back off the disk
-                  mid-reply
+                  {m.recalled
+                    ? `⇄ read ${m.recalled === 1 ? "a chunk" : `${m.recalled} chunks`} back off the disk`
+                    : ""}
+                  {m.recalled && (m.searched || m.opened) ? " · " : ""}
+                  {m.searched ? `⇄ searched the web ×${m.searched}` : ""}
+                  {m.searched && m.opened ? " · " : ""}
+                  {m.opened ? `⇄ opened ${m.opened} page${m.opened === 1 ? "" : "s"}` : ""}
                 </div>
               ) : null}
               {hidden ? null : jobbed && pacing ? (
@@ -216,6 +224,15 @@ export function Chat({
 
       <div className="composer">
         {pacing && retro && pacing.phase === "paging" && <JobConsole view={pacing} compact />}
+        {/* The model stopped talking to go and look something up. Without this the
+            turn reads as stalled exactly while it is working hardest. */}
+        {webActive && (
+          <div className="web-live" role="status" aria-live="polite">
+            <span className="web-live-dot" aria-hidden="true" />
+            <span className="web-live-text">{activeWebText(webActive)}</span>
+            <span className="web-live-note">waiting on the network</span>
+          </div>
+        )}
         {attachments.length > 0 && (
           <div className="chips">
             {attachments.map((a) => (
@@ -374,6 +391,16 @@ function peelThink(content: string, reasoning?: string) {
   return { reasoning, content };
 }
 
+/** The host of a source, for the chip: the reader cares more about the site
+ *  than about the path, and the whole URL is in the tooltip. */
+function sourceHost(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "link";
+  }
+}
+
 function MessageView({
   message,
   live,
@@ -422,6 +449,8 @@ function MessageView({
             : ""}
         {message.truncated && <span className="badge warn">cut at max_tokens</span>}
         {!!message.continues && <span className="badge">continued ×{message.continues}</span>}
+        {!!message.searched && <span className="badge web">searched ×{message.searched}</span>}
+        {!!message.opened && <span className="badge web">read {message.opened} page{message.opened === 1 ? "" : "s"}</span>}
         {fence.open && !live && peeled.content.trim() && (
           <span className="badge">open ```{fence.lang} block</span>
         )}
@@ -430,6 +459,24 @@ function MessageView({
         <Think text={peeled.reasoning} live={live && !peeled.content} />
       ) : null}
       {peeled.content ? <MarkdownView text={peeled.content} /> : live ? <span className="caret" /> : null}
+      {message.sources && message.sources.length > 0 && (
+        <div className="web-sources">
+          <span className="web-sources-head">read this turn</span>
+          {message.sources.map((source) => (
+            <a
+              key={source.url}
+              className="web-source"
+              href={source.url}
+              target="_blank"
+              rel="noreferrer noopener"
+              title={source.url}
+            >
+              <span className="web-source-host">{sourceHost(source.url)}</span>
+              <span className="web-source-title">{source.title}</span>
+            </a>
+          ))}
+        </div>
+      )}
       {message.error && <div className="err">{message.error}</div>}
       {resumable && (
         <div className="continue-row">

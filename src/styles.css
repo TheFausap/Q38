@@ -746,6 +746,101 @@ button { cursor: pointer; }
 }
 .banner.fold .icon-btn { padding: 3px 8px; font-size: 11px; }
 
+/* While the model is off looking something up. */
+.web-live {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 7px;
+  padding: 6px 10px;
+  border: 1px dashed #2c4a3a;
+  border-radius: var(--radius);
+  background: rgba(44, 74, 58, 0.12);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: #a7d7bd;
+}
+.web-live-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: #6fbf94;
+  box-shadow: 0 0 0 0 rgba(111, 191, 148, 0.6);
+  animation: web-pulse 1.4s ease-out infinite;
+}
+@keyframes web-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(111, 191, 148, 0.55); }
+  70% { box-shadow: 0 0 0 7px rgba(111, 191, 148, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(111, 191, 148, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .web-live-dot { animation: none; }
+}
+.web-live-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.web-live-note {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+.banner.web {
+  background: #0d1512;
+  color: #a7cbb6;
+  border-bottom-color: #1f3129;
+}
+.banner.web .icon-btn { padding: 3px 8px; font-size: 11px; }
+
+/* Sources the reply actually looked at, under it. */
+.web-sources {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed #22303a;
+}
+.web-sources-head {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.web-source {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 420px;
+  padding: 2px 7px;
+  border: 1px solid #23303a;
+  border-radius: 3px;
+  text-decoration: none;
+  overflow: hidden;
+}
+.web-source:hover { border-color: #3d5a70; background: rgba(111, 158, 196, 0.07); }
+.web-source-host {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: #8fc0e6;
+  white-space: nowrap;
+}
+.web-source-title {
+  font-size: 11px;
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.jc-line.jc-web .jc-text { color: #9fd3b4; }
+.badge.web { border-color: #2c4a3a; color: #9fd3b4; }
+
+.modal-row { display: flex; gap: 12px; }
+.modal-row .field { flex: 1; }
+
 .banner.memory {
   background: #101820;
   color: #a9c6dd;
