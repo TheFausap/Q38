@@ -364,11 +364,14 @@ export function buildWireMessages(
   opts: ChatStreamOptions,
 ): WireMessage[] {
   const out: WireMessage[] = [];
-  if (settings.systemPrompt.trim()) {
-    out.push({ role: "system", content: settings.systemPrompt.trim() });
-  }
-  for (const brief of opts.systemExtra ?? []) {
-    if (brief.trim()) out.push({ role: "system", content: brief.trim() });
+  /* Qwen-family chat templates accept exactly one system message, and only at
+     index 0 — a second one raises "System message must be at the beginning".
+     So the prompt, briefs, recalls and tool results are joined into one. */
+  const systemParts = [settings.systemPrompt, ...(opts.systemExtra ?? [])]
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (systemParts.length) {
+    out.push({ role: "system", content: systemParts.join("\n\n") });
   }
   for (const m of messages) {
     if (m.role === "system") continue;
