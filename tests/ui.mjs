@@ -729,6 +729,12 @@ try {
   const thinkReply = stored().messages[stored().messages.length - 1];
   check(!/<tool_call>/.test(thinkReply.reasoning || ""), "the call is taken out of the thinking shown");
   check(thinkReply.trace?.[0]?.via === "thinking", "and the trace says where it was found");
+  const thinkTurn = thinkCalls[1].messages.find((m) => m.tool_calls?.length);
+  check(
+    /I need the passage first, so I will search the library\./.test(thinkTurn?.reasoning_content || ""),
+    "the thinking that led to the call goes back with it, for the template's <think>",
+  );
+  check(!/<tool_call>/.test(thinkTurn?.reasoning_content || ""), "without the call's own markup");
 
   /* --- 11g. silence after the results earns one nudge ----------------- */
   const beforeSilent = calls.length;

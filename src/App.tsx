@@ -164,8 +164,8 @@ function blankSession(modeId: string, family: ModeFamily): Session {
   };
 }
 
-/** `fresh` is what this round itself wrote, tool markup removed. */
-type Round = { body: string; reasoning: string; finish: FinishInfo; fresh: string };
+/** `fresh` and `thought` are what this round itself wrote and thought, tool markup removed. */
+type Round = { body: string; reasoning: string; finish: FinishInfo; fresh: string; thought: string };
 
 /** Longest drop that may be written into ./workspace (mirrors server/api.mjs). */
 const DROP_MAX_BYTES = 8 * 1024 * 1024;
@@ -1731,7 +1731,7 @@ export function App() {
       truncated: finish.truncated,
       trace: [...(m.trace ?? []), traced],
     }));
-    return { body: s.body, reasoning: s.reasoning, finish, fresh };
+    return { body: s.body, reasoning: s.reasoning, finish, fresh, thought: freshReasoning.trim() };
   };
 
   /**
@@ -1885,12 +1885,17 @@ export function App() {
             directive: undefined,
             extraSystem: [
               ...(args.extraSystem ?? []),
-              "You have received the results of your tool calls above. Use them now: write your answer to the user, " +
+              (round.finish.truncated
+                ? "Your thinking ran out of room before you answered. Think briefly this time — a few lines — then answer. "
+                : "") +
+                "You have received the results of your tool calls above. Use them now: write your answer to the user, " +
                 "or call the next tool you need. A tool call goes after your thinking, never inside it.",
             ],
             tools: args.tools,
             trail: [...trail],
-            note: "nudged: the round after the tool results said nothing",
+            note: round.finish.truncated
+              ? "nudged: the round after the tool results ran out of tokens while thinking"
+              : "nudged: the round after the tool results said nothing",
           });
           continue;
         }
@@ -1926,6 +1931,10 @@ export function App() {
         {
           role: "assistant",
           content: round.fresh.trim(),
+          /* the thinking that led to these calls: the template renders it in
+             <think>, and without it the model meets its own calls cold after
+             the results and plans the whole turn again */
+          ...(round.thought ? { reasoning_content: round.thought } : {}),
           tool_calls: called.map((c) => ({ id: c.id, type: "function" as const, function: { name: c.name, arguments: c.arguments } })),
         },
         ...responses,
@@ -1965,6 +1974,7 @@ export function App() {
         {
           role: "assistant",
           content: round.fresh.trim(),
+          ...(round.thought ? { reasoning_content: round.thought } : {}),
           tool_calls: pending.map((c) => ({ id: c.id, type: "function" as const, function: { name: c.name, arguments: c.arguments } })),
         },
         ...pending.map((c) => ({

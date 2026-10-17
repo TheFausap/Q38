@@ -365,7 +365,14 @@ export async function countTokens(text: string, settings: Settings): Promise<num
 }
 
 export type WireToolCall = { id: string; type: "function"; function: { name: string; arguments: string } };
-export type WireMessage = { role: string; content: string; tool_calls?: WireToolCall[]; tool_call_id?: string };
+export type WireMessage = {
+  role: string;
+  content: string;
+  /** the model's thinking for this message; Qwen templates render it inside <think> */
+  reasoning_content?: string;
+  tool_calls?: WireToolCall[];
+  tool_call_id?: string;
+};
 
 export function buildWireMessages(
   messages: ChatMessage[],
