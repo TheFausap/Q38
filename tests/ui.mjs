@@ -619,6 +619,10 @@ try {
   check(docCalls.length === 3, `add, search, answer: three rounds (${docCalls.length})`);
   const docTools = (docCalls[0].tools || []).map((t) => t.function?.name);
   check(["doc_add", "doc_search", "doc_read"].every((n) => docTools.includes(n)), "the library tools are offered, even while it is empty");
+  const briefed = docCalls[0].messages[0];
+  check(briefed.role === "system" && /## Tools available in this conversation/.test(briefed.content), "the system message names the tools in words");
+  check(/you DO have internet access/.test(briefed.content) && /you CAN download and read PDFs/.test(briefed.content), "and says they are real");
+  check(docCalls[0].messages.filter((m) => m.role === "system").length === 1, "still one system message");
   const afterAdd = docCalls[1].messages;
   check(
     afterAdd[0].role === "system" && afterAdd.filter((m) => m.role === "system").length === 1,

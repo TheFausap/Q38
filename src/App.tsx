@@ -47,6 +47,7 @@ import {
   type ContextUsage,
 } from "./lib/context";
 import { modeById, reasonTag } from "./lib/modes";
+import { toolBriefing, toolNames } from "./lib/toolbrief";
 import {
   DOC_MAX_ADDS_PER_TURN,
   DOC_MAX_READS_PER_TURN,
@@ -281,6 +282,8 @@ export function App() {
   const [libDocs, setLibDocs] = useState<LibraryDoc[] | null>(null);
   const [libNotice, setLibNotice] = useState<string | null>(null);
   const [libBusy, setLibBusy] = useState<string | null>(null);
+  /** the tools the last turn went out with, for the Server tab */
+  const [lastTools, setLastTools] = useState<string[] | null>(null);
   /** OCR reads in progress on the server, polled while something may be running */
   const [libJobs, setLibJobs] = useState<LibraryJob[]>([]);
   const [libRoot, setLibRoot] = useState("");
@@ -2057,22 +2060,26 @@ export function App() {
 
     let wire = messagesAfter(history, cutIdOf(target));
     let systemExtra: string[] = [];
-    let tools: unknown[] | undefined;
     try {
       const prepared = await prepareWindow(target, history, userMsg ? [userMsg] : [], content);
       wire = prepared.wire;
       systemExtra = prepared.systemExtra;
-      /* offer each tool only when there is something on the other end of it */
-      const onDisk = archivesOf(target).length > 0;
-      const offered: unknown[] = [];
-      if (onDisk && settings.recallTool) offered.push(RECALL_TOOL);
-      if (settings.webSearch) offered.push(...WEB_TOOLS);
-      if (settings.skills) offered.push(...skillTools(skills));
-      if (settings.library) offered.push(...libraryTools(libDocs ?? [], { ocr: Boolean(settings.ocrUrl.trim()) }));
-      tools = offered.length ? offered : undefined;
     } catch (err) {
       setFoldNotice(`Could not prepare the context: ${err instanceof Error ? err.message : String(err)}`);
     }
+    /* Offer each tool only when there is something on the other end of it.
+       Built outside the try above: a memory store that is out of reach must
+       not cost the turn its web and library tools. */
+    const offered: unknown[] = [];
+    if (archivesOf(target).length > 0 && settings.recallTool) offered.push(RECALL_TOOL);
+    if (settings.webSearch) offered.push(...WEB_TOOLS);
+    if (settings.skills) offered.push(...skillTools(skills));
+    if (settings.library) offered.push(...libraryTools(libDocs ?? [], { ocr: Boolean(settings.ocrUrl.trim()) }));
+    const tools: unknown[] | undefined = offered.length ? offered : undefined;
+    /* and say so in words, first thing after the system prompt */
+    const briefing = toolBriefing(tools);
+    if (briefing) systemExtra = [briefing, ...systemExtra];
+    setLastTools(toolNames(tools));
 
     const asst: ChatMessage = { id: uid(), role: "assistant", content: "", reasoning: "" };
     const titleSource = content || userMsg?.content || target.title;
@@ -2507,6 +2514,7 @@ export function App() {
             onLibraryEmbed={() => void embedLibrary()}
             onLibraryReload={() => void reloadLibrary()}
             libJobs={libJobs}
+            lastTools={lastTools}
             ocrOn={Boolean(settings.ocrUrl.trim())}
             onLibraryReocr={(id) => void reocrDoc(id)}
           />

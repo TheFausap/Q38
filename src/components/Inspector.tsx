@@ -60,6 +60,7 @@ export function Inspector({
   onLibraryEmbed,
   onLibraryReload,
   libJobs,
+  lastTools,
   ocrOn,
   onLibraryReocr,
 }: {
@@ -106,10 +107,14 @@ export function Inspector({
   onLibraryEmbed: () => void;
   onLibraryReload: () => void;
   libJobs: LibraryJob[];
+  lastTools: string[] | null;
   ocrOn: boolean;
   onLibraryReocr: (id: string) => void;
 }) {
   const [libUrl, setLibUrl] = useState("");
+  /* llama-server reports its template in /props; one with no "tools" in it drops them */
+  const template = typeof status?.props?.chat_template === "string" ? (status.props.chat_template as string) : "";
+  const templateLacksTools = template.length > 0 && !/\btools\b/.test(template);
   const [q, setQ] = useState("");
   const mode = modeById(modeId);
   const tag = reasonTag(family, modeId);
@@ -763,7 +768,21 @@ export function Inspector({
             <dd>{status?.models[0]?.id?.split(/[/\\]/).pop() || "—"}</dd>
             <dt>workspace</dt>
             <dd className="break">{status?.workspace ?? "—"}</dd>
+            <dt>tools</dt>
+            <dd className="break">
+              {lastTools === null
+                ? "sent with the next turn"
+                : lastTools.length
+                  ? `last turn: ${lastTools.join(", ")}`
+                  : "none on the last turn — all tool settings are off"}
+            </dd>
           </dl>
+          {templateLacksTools && (
+            <p className="hint tiny warn-text">
+              The loaded chat template never mentions tools, so the model cannot see them. Start
+              llama-server with <code>--jinja</code> and a GGUF whose template supports tool calling.
+            </p>
+          )}
           <div className="group-label">Machine pacing</div>
           <p className="hint">
             The console reads what llama-server actually reports: <code>503 Loading model</code> while

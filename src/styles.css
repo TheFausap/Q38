@@ -1334,3 +1334,4 @@ button { cursor: pointer; }
 .lib-job-text span { color: var(--brass-2); font-family: var(--mono); white-space: nowrap; }
 .lib-job-bar { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; }
 .lib-job-bar span { display: block; height: 100%; background: var(--brass); transition: width 0.4s ease; }
+.warn-text { color: #e0b070; }
