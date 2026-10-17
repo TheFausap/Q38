@@ -49,7 +49,7 @@ import {
 } from "./lib/context";
 import { modeById, reasonTag } from "./lib/modes";
 import { toolBriefing, toolNames } from "./lib/toolbrief";
-import { normaliseArgs, parseTextToolCalls } from "./lib/textcalls";
+import { normaliseArgs, parseTextToolCalls, trailingToolCalls } from "./lib/textcalls";
 import {
   DOC_MAX_ADDS_PER_TURN,
   DOC_MAX_READS_PER_TURN,
@@ -137,6 +137,7 @@ import type {
   ArchiveRef,
   Attachment,
   ChatMessage,
+  RoundTrace,
   Compaction,
   FileNode,
   FinishInfo,
@@ -1545,11 +1546,15 @@ export function App() {
     tools?: unknown[];
     /** this turn's tool exchange so far: the model's calls and their results */
     trail?: WireMessage[];
+    /** why this round was sent, for the turn trace */
+    note?: string;
   }): Promise<Round> => {
     const { acc, start } = args;
     const resuming = Boolean(start.body || start.reasoning);
     let freshBody = "";
     let freshReasoning = "";
+    /** what llama-server reported for this round: tokens read and generated */
+    const roundTimings: { prompt_n?: number; predicted_n?: number } = {};
     let finish: FinishInfo = { ...EMPTY_FINISH };
 
     /* After tool results the model starts a new reply rather than continuing
@@ -1593,6 +1598,7 @@ export function App() {
             noteToken(c.length);
           },
           onTimings: (t, extra) => {
+            Object.assign(roundTimings, t);
             patchMessage(args.sessionId, args.messageId, (m) => ({ ...m, timings: t, demo: extra?.demo }));
             if (extra?.demo) setDemoNotice(true);
             if (t.predicted_per_second && t.predicted_per_second > 0) {
@@ -1663,6 +1669,7 @@ export function App() {
        out of the reply. Structured calls get their argument names mapped
        onto the declared ones too — models guess `doc_id` for `doc`. */
     let fresh = freshBody;
+    let callsVia: "text" | "thinking" | undefined;
     if (args.tools?.length) {
       if (finish.calls?.length) {
         finish = {
@@ -1679,23 +1686,50 @@ export function App() {
         if (found.calls.length) {
           finish = { ...finish, calls: found.calls, reason: "tool_calls" };
           fresh = found.cleaned;
+          callsVia = "text";
           setWebNotice(
             `The model wrote ${found.calls.length === 1 ? "its tool call" : `${found.calls.length} tool calls`} as text (${found.calls
               .map((c) => c.name)
               .join(", ")}) — read and run anyway. Updating llama.cpp usually makes it parse them itself.`,
           );
+        } else if (!freshBody.trim()) {
+          /* nothing said, so look at the end of the thinking: a call written
+             before </think> is filed as reasoning and would otherwise be lost */
+          const thought = trailingToolCalls(freshReasoning, args.tools);
+          if (thought.calls.length) {
+            finish = { ...finish, calls: thought.calls, reason: "tool_calls" };
+            freshReasoning = thought.before;
+            callsVia = "thinking";
+            setWebNotice(
+              `The model wrote ${thought.calls.length === 1 ? "its tool call" : `${thought.calls.length} tool calls`} inside its thinking (${thought.calls
+                .map((c) => c.name)
+                .join(", ")}) — run anyway.`,
+            );
+          }
         }
       }
     }
     const s = settleWith(fresh);
     acc.body = s.body;
     acc.reasoning = s.reasoning;
+    /* the turn trace: what each round came back with, for when a turn stalls */
+    const traced: RoundTrace = {
+      reason: finish.truncated ? "length" : finish.reason || "stop",
+      calls: (finish.calls ?? []).map((c) => c.name),
+      via: callsVia,
+      text: fresh.trim().length,
+      thinking: freshReasoning.trim().length,
+      prompt: roundTimings.prompt_n,
+      generated: roundTimings.predicted_n,
+      note: args.note,
+    };
     patchMessage(args.sessionId, args.messageId, (m) => ({
       ...m,
       content: s.body,
       reasoning: s.reasoning,
       finishReason: finish.reason || m.finishReason,
       truncated: finish.truncated,
+      trace: [...(m.trace ?? []), traced],
     }));
     return { body: s.body, reasoning: s.reasoning, finish, fresh };
   };
@@ -1831,9 +1865,37 @@ export function App() {
         id: c.id || `call_${args.messageId.slice(0, 8)}_${++callSeq}`,
       }));
 
+    let nudged = false;
     while (!args.ctrl.signal.aborted && hops < MAX_TOOL_HOPS) {
       const called = asWireCalls(round.finish.calls ?? []);
-      if (!called.length) break;
+      if (!called.length) {
+        /* Results came back and the model said nothing — it thought, then
+           stopped. Ask once, plainly, for the answer (or the next call). */
+        if (trail.length && !round.fresh.trim() && !nudged) {
+          nudged = true;
+          round = await runRound({
+            sessionId: args.sessionId,
+            messageId: args.messageId,
+            wire: args.wireBefore,
+            systemExtra: args.systemExtra,
+            ctrl: args.ctrl,
+            acc,
+            start: { body: round.body, reasoning: round.reasoning },
+            continueFinal: null,
+            directive: undefined,
+            extraSystem: [
+              ...(args.extraSystem ?? []),
+              "You have received the results of your tool calls above. Use them now: write your answer to the user, " +
+                "or call the next tool you need. A tool call goes after your thinking, never inside it.",
+            ],
+            tools: args.tools,
+            trail: [...trail],
+            note: "nudged: the round after the tool results said nothing",
+          });
+          continue;
+        }
+        break;
+      }
       const runnable = called.filter((c) => (used[c.name] ?? 0) < (caps[c.name] ?? 4));
       if (!runnable.length) break; // every call is over its cap: the final round answers
 

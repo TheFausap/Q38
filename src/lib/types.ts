@@ -44,6 +44,23 @@ export type FinishInfo = {
   calls?: { id: string; name: string; arguments: string }[];
 };
 
+/** One round of a reply, as it came back — the turn trace. */
+export type RoundTrace = {
+  /** "stop", "tool_calls", "length" … */
+  reason: string;
+  /** tools the round asked for */
+  calls: string[];
+  /** where calls were found when llama-server did not parse them */
+  via?: "text" | "thinking";
+  /** characters of reply text and of thinking the round produced */
+  text: number;
+  thinking: number;
+  /** llama-server's own counts for the round, when it sent them */
+  prompt?: number;
+  generated?: number;
+  note?: string;
+};
+
 export type ChatMessage = {
   id: string;
   role: Role;
@@ -57,6 +74,8 @@ export type ChatMessage = {
   skillsRead?: string[];
   /** library documents this reply searched or read */
   docsUsed?: string[];
+  /** each round of the reply: how it ended, what it called, how much it said */
+  trace?: RoundTrace[];
   /** the pages this reply actually looked at, for the reader's benefit */
   sources?: { title: string; url: string }[];
   reasoning?: string;

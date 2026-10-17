@@ -163,3 +163,28 @@ export function stripToolMarkup(text: string): string {
     .replace(/\n{3,}/g, "\n\n")
     .trimEnd();
 }
+
+const BLOCK = /<tool_call>[\s\S]*?(?:<\/tool_call>|$)|<function=[\w.-]+>[\s\S]*?(?:<\/function>|$)/g;
+
+/**
+ * Tool calls at the very end of a model's thinking, with nothing after them.
+ *
+ * Some fine-tunes write their call before closing </think>, so llama-server
+ * files it under reasoning and the round looks empty. Only a trailing group
+ * counts — a call written mid-thought, with more thinking after it, is the
+ * model planning, not calling.
+ */
+export function trailingToolCalls(text: string, tools: unknown[]): { calls: TextCall[]; before: string } {
+  const src = String(text || "");
+  if (!/<tool_call>|<function=/.test(src) || !tools.length) return { calls: [], before: src };
+  const blocks = [...src.matchAll(BLOCK)].map((m) => ({ start: m.index ?? 0, end: (m.index ?? 0) + m[0].length }));
+  if (!blocks.length) return { calls: [], before: src };
+  /* the group must reach the end, with only whitespace (or a stray tag) between its blocks */
+  const gap = (s: string) => /^[\s]*(<\/?(tool_call|think)>[\s]*)*$/.test(s);
+  if (!gap(src.slice(blocks[blocks.length - 1].end))) return { calls: [], before: src };
+  let first = blocks.length - 1;
+  while (first > 0 && gap(src.slice(blocks[first - 1].end, blocks[first].start))) first--;
+  const tail = src.slice(blocks[first].start);
+  const { calls } = parseTextToolCalls(tail, tools);
+  return calls.length ? { calls, before: src.slice(0, blocks[first].start).trimEnd() } : { calls: [], before: src };
+}

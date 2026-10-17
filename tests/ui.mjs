@@ -93,9 +93,15 @@ const stub = http.createServer((req, res) => {
     /* TEXTCALLPLEASE: the call arrives as plain content in Qwen's XML form, the
        way a fine-tune does when llama-server's parser misses it */
     const writesCallAsText = /TEXTCALLPLEASE/.test(newestText);
+    /* THINKCALLPLEASE: the call is written at the end of the thinking, and the
+       round has no reply text at all */
+    const callsInThinking = /THINKCALLPLEASE/.test(newestText);
+    /* SILENTPLEASE: after the tool result the model says nothing, once */
+    const silentAfterTools = /SILENTPLEASE/.test(newestText);
     /* GREEDYSKILL never stops asking: the workbench has to end the turn itself */
     const greedy = /GREEDYSKILL/.test(newestText);
     const wireText = JSON.stringify(body.messages || []);
+    const nudged = wireText.includes("You have received the results of your tool calls");
     const already = (name) =>
       wireText.includes(name === "recall" ? "### Recalled" : name === "web_search" ? "### Web results" : "### Page:");
     const offered = (name) => body.tools?.some((t) => t.function?.name === name);
@@ -156,6 +162,25 @@ const stub = http.createServer((req, res) => {
     }
     if (asksForDoc && offered("doc_search") && !wireText.includes("### Library passages")) {
       emit("doc_search", JSON.stringify({ query: "how often does each block of the continuum memory update" }));
+      return;
+    }
+    if ((callsInThinking || silentAfterTools) && offered("doc_search") && !wireText.includes("### Library passages")) {
+      const call =
+        "<tool_call>\n<function=doc_search>\n<parameter=query>\ncontinuum memory update frequency\n</parameter>\n</function>\n</tool_call>";
+      const delta = callsInThinking
+        ? { reasoning_content: `I need the passage first, so I will search the library.\n\n${call}\n` }
+        : { content: `Let me search.\n\n${call}` };
+      chunk({ choices: [{ index: 0, delta, finish_reason: null }] });
+      chunk({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }], timings: { prompt_n: 900, predicted_n: 60 } });
+      res.write("data: [DONE]\n\n");
+      res.end();
+      return;
+    }
+    if (silentAfterTools && !nudged) {
+      /* the stall: a round that comes back with nothing */
+      chunk({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }], timings: { prompt_n: 1400, predicted_n: 1 } });
+      res.write("data: [DONE]\n\n");
+      res.end();
       return;
     }
     if (writesCallAsText && offered("doc_search") && !wireText.includes("### Library passages")) {
@@ -685,6 +710,46 @@ try {
   check(/Let me search the library\./.test(textReply.content), "the prose around it stays");
   check(!/<tool_call>/.test(allText()), "and none is on the page");
   check(/wrote its tool call as text/.test(text(".banner.web")), `the banner says what happened: ${text(".banner.web").slice(0, 90)}`);
+
+  /* --- 11f. a call written inside the thinking is still run ----------- */
+  const beforeThink = calls.length;
+  await ask("search for the update frequencies THINKCALLPLEASE");
+  const thinkCalls = calls.slice(beforeThink).filter((c) => JSON.stringify(c.messages).includes("THINKCALLPLEASE"));
+  check(thinkCalls.length === 2, `a call at the end of the thinking is run (${thinkCalls.length} rounds)`);
+  check(
+    /### Library passages for "continuum memory update frequency"/.test(
+      thinkCalls[1].messages.filter((m) => m.role === "tool").map((m) => m.content).join("\n"),
+    ),
+    "with the query it wrote",
+  );
+  await waitFor("the think-call reply is saved", () => {
+    const msgs = stored().messages;
+    return /Noted\./.test(msgs[msgs.length - 1]?.content || "");
+  }, 5000);
+  const thinkReply = stored().messages[stored().messages.length - 1];
+  check(!/<tool_call>/.test(thinkReply.reasoning || ""), "the call is taken out of the thinking shown");
+  check(thinkReply.trace?.[0]?.via === "thinking", "and the trace says where it was found");
+
+  /* --- 11g. silence after the results earns one nudge ----------------- */
+  const beforeSilent = calls.length;
+  await ask("what does it say? SILENTPLEASE");
+  const silentCalls = calls.slice(beforeSilent).filter((c) => JSON.stringify(c.messages).includes("SILENTPLEASE"));
+  check(silentCalls.length === 3, `call, silent round, nudged round (${silentCalls.length})`);
+  const nudgeSys = silentCalls[2].messages[0].content;
+  check(/You have received the results of your tool calls/.test(nudgeSys), "the third round carries the nudge");
+  check(silentCalls[2].messages.some((m) => m.role === "tool"), "and still the tool results");
+  await waitFor("the nudged reply is saved", () => {
+    const msgs = stored().messages;
+    return /Noted\./.test(msgs[msgs.length - 1]?.content || "");
+  }, 5000);
+  const silentReply = stored().messages[stored().messages.length - 1];
+  const tr = silentReply.trace || [];
+  check(tr.length === 3 && tr[0].calls[0] === "doc_search", `the trace has three rounds (${tr.map((r) => r.reason).join(", ")})`);
+  check(tr[1].text === 0 && tr[1].calls.length === 0 && tr[1].generated === 1 && tr[1].prompt === 1400, "the silent round is recorded with llama-server's counts");
+  check(/nudged/.test(tr[2].note || ""), "the nudged round says why it was sent");
+  const traceEl = [...window.document.querySelectorAll(".turn-trace")].pop();
+  check(!!traceEl && /3 rounds/.test(traceEl.textContent), "the trace is on the page under the reply");
+  check(/said nothing/.test(traceEl.textContent) && /1 tok generated of a 1400-tok prompt/.test(traceEl.textContent), `and reads plainly: ${traceEl.textContent.replace(/\s+/g, " ").slice(0, 160)}`);
 
   /* the Library tab shows it */
   const libTab = byText(/^library$/);

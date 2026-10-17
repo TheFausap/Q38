@@ -1335,3 +1335,9 @@ button { cursor: pointer; }
 .lib-job-bar { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; }
 .lib-job-bar span { display: block; height: 100%; background: var(--brass); transition: width 0.4s ease; }
 .warn-text { color: #e0b070; }
+.turn-trace { margin: 2px 0 8px; font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.turn-trace summary { cursor: pointer; width: fit-content; }
+.turn-trace summary:hover { color: var(--muted); }
+.turn-trace ol { margin: 6px 0 0; padding-left: 22px; color: var(--muted); line-height: 1.6; }
+.turn-trace .hot { color: #e0b070; }
+.turn-trace em { color: var(--dim); }

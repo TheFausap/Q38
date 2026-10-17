@@ -8,6 +8,7 @@ import { ArchiveCard } from "./Memory";
 import type { ArchiveRef, Attachment, ChatMessage, Compaction, ModeFamily, Session } from "../lib/types";
 import { MarkdownView } from "./MarkdownView";
 import { stripToolMarkup } from "../lib/textcalls";
+import type { RoundTrace } from "../lib/types";
 import { activeWebText } from "../lib/web";
 
 export function Chat({
@@ -204,6 +205,7 @@ export function Chat({
                     .join(" · ")}
                 </div>
               ) : null}
+              {!hidden && m.role === "assistant" && m.trace && showTrace(m.trace) ? <TurnTrace trace={m.trace} /> : null}
               {hidden ? null : jobbed && pacing ? (
                 retro ? (
                   <JobConsole view={pacing} onCancel={onCancelJob} />
@@ -543,5 +545,46 @@ function Think({ text, live }: { text: string; live: boolean }) {
         </div>
       )}
     </div>
+  );
+}
+
+/** Worth showing: more than one round, or a round that went oddly. */
+function showTrace(trace: RoundTrace[]): boolean {
+  return trace.length > 1 || trace.some((r) => r.via || r.note || r.reason === "length" || (!r.text && !r.calls.length));
+  /* (an empty round is exactly what someone debugging a stalled turn needs to see) */
+}
+
+function kchars(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+}
+
+/** Round by round: how each ended, what it called, how much it said and thought. */
+function TurnTrace({ trace }: { trace: RoundTrace[] }) {
+  const calls = trace.reduce((n, r) => n + r.calls.length, 0);
+  return (
+    <details className="turn-trace">
+      <summary>
+        turn trace · {trace.length} round{trace.length === 1 ? "" : "s"}
+        {calls ? ` · ${calls} tool call${calls === 1 ? "" : "s"}` : ""}
+      </summary>
+      <ol>
+        {trace.map((r, i) => {
+          const counted = r.calls.reduce<Record<string, number>>((acc, c) => ((acc[c] = (acc[c] ?? 0) + 1), acc), {});
+          const called = Object.entries(counted).map(([c, n]) => (n > 1 ? `${c} ×${n}` : c)).join(", ");
+          return (
+            <li key={i}>
+              <span className={r.reason === "length" ? "hot" : ""}>{r.reason}</span>
+              {called ? ` → ${called}` : ""}
+              {r.via ? ` (written in its ${r.via === "thinking" ? "thinking" : "reply text"})` : ""}
+              {` · ${kchars(r.text)} text · ${kchars(r.thinking)} thinking`}
+              {r.generated != null ? ` · ${r.generated} tok generated` : ""}
+              {r.prompt != null ? ` of a ${r.prompt}-tok prompt` : ""}
+              {!r.text && !r.calls.length ? " · said nothing" : ""}
+              {r.note ? <em> — {r.note}</em> : null}
+            </li>
+          );
+        })}
+      </ol>
+    </details>
   );
 }

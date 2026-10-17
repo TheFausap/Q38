@@ -4,7 +4,7 @@
  *   node --experimental-strip-types tests/textcalls.test.ts
  */
 import assert from "node:assert/strict";
-import { normaliseArgs, parseTextToolCalls, stripToolMarkup } from "../src/lib/textcalls.ts";
+import { normaliseArgs, parseTextToolCalls, stripToolMarkup, trailingToolCalls } from "../src/lib/textcalls.ts";
 import { libraryTools } from "../src/lib/library.ts";
 import { WEB_TOOLS } from "../src/lib/web.ts";
 
@@ -95,6 +95,20 @@ Hope self-referential learning module controller update rule architecture
   assert.equal(stripToolMarkup(reported), "You're right, my apologies — I do have those tools. Let me actually use them now.");
   assert.equal(stripToolMarkup("no markup"), "no markup");
   assert.match(stripToolMarkup("```\n<tool_call>x</tool_call>\n```"), /<tool_call>x<\/tool_call>/, "code fences are left alone");
+}
+
+/* calls at the end of the thinking */
+{
+  const thinking = "I should read the outline first.\n\n<tool_call>\n<function=doc_read>\n<parameter=doc_id>\nnested-learning\n</parameter>\n</function>\n</tool_call>\n";
+  const t = trailingToolCalls(thinking, tools);
+  assert.equal(t.calls.length, 1, "a call that ends the thinking is found");
+  assert.deepEqual(JSON.parse(t.calls[0].arguments), { doc: "nested-learning" });
+  assert.equal(t.before, "I should read the outline first.", "the thinking before it is kept");
+  const two = trailingToolCalls(`plan\n${thinking}<tool_call>\n<function=doc_search>\n<parameter=query>\nCMS\n</parameter>\n</function>\n</tool_call></think>`, tools);
+  assert.equal(two.calls.length, 2, "a trailing group of calls, even with a stray </think>");
+  const midThought = trailingToolCalls(`${thinking}\nBut first, let me reconsider whether that is needed at all.`, tools);
+  assert.equal(midThought.calls.length, 0, "a call with more thinking after it is planning, not calling");
+  assert.equal(trailingToolCalls("just thinking", tools).calls.length, 0);
 }
 
 console.log("text tool call checks passed");
