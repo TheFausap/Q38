@@ -2673,24 +2673,31 @@ function SettingsModal({
               }
             />
           </label>
-          <label className="field">
-            <span>embeddings server (blank = keyword search)</span>
-            <input
-              type="url"
-              placeholder="http://127.0.0.1:8081"
-              value={settings.embedUrl}
-              onChange={(e) => onChange({ ...settings, embedUrl: e.target.value })}
-            />
-          </label>
-          <label className="field">
-            <span>OCR server (blank = off)</span>
-            <input
-              type="url"
-              placeholder="http://127.0.0.1:8000 — PaddleOCR-VL on vLLM"
-              value={settings.ocrUrl}
-              onChange={(e) => onChange({ ...settings, ocrUrl: e.target.value })}
-            />
-          </label>
+        </div>
+        <div className="group-label">Library &amp; skills</div>
+        <p className="hint">
+          Optional servers for the library: embeddings let search match by meaning, OCR reads scanned
+          PDFs and re-reads papers whose equations the text layer garbles. Leave either blank to skip it.
+        </p>
+        <label className="field">
+          <span>embeddings server (blank = keyword search)</span>
+          <input
+            type="url"
+            placeholder="http://127.0.0.1:8081"
+            value={settings.embedUrl}
+            onChange={(e) => onChange({ ...settings, embedUrl: e.target.value })}
+          />
+        </label>
+        <label className="field">
+          <span>OCR server (blank = off)</span>
+          <input
+            type="url"
+            placeholder="http://127.0.0.1:8000 — PaddleOCR-VL on vLLM"
+            value={settings.ocrUrl}
+            onChange={(e) => onChange({ ...settings, ocrUrl: e.target.value })}
+          />
+        </label>
+        <div className="modal-row">
           <label className="field">
             <span>characters per document read</span>
             <input

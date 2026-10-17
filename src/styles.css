@@ -646,6 +646,10 @@ button { cursor: pointer; }
   border-radius: 8px;
   padding: 16px 18px 18px;
   box-shadow: var(--shadow);
+  /* taller than the window: scroll inside the dialog, so done stays reachable */
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .modal header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
 .modal h2 { margin: 0; font-family: var(--display); }
