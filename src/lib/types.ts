@@ -246,9 +246,19 @@ export type Settings = {
   embedUrl: string;
   /** characters one doc_read may bring into the prompt */
   docReadChars: number;
-  /** an OpenAI-compatible vision endpoint serving an OCR model (PaddleOCR-VL on vLLM); blank = off */
+  /** an OpenAI-compatible vision endpoint serving an OCR model (PaddleOCR-VL, OvisOCR2 … on vLLM); blank = off */
   ocrUrl: string;
+  /** how to ask it: picked from the served model's name, or set by hand */
+  ocrProfile: OcrProfile;
+  /** Custom profile only: the instruction sent with each page */
+  ocrPrompt: string;
+  /** Custom profile only: output tokens per page (0 = the profile's default) */
+  ocrMaxTokens: number;
+  /** Custom profile only: megapixels each page is rendered at (0 = the profile's default) */
+  ocrMegapixels: number;
 };
+
+export type OcrProfile = "auto" | "paddleocr-vl" | "ovisocr2" | "custom";
 
 export type SearchProvider = "auto" | "searx" | "brave" | "tavily" | "duckduckgo";
 
@@ -319,4 +329,8 @@ export const DEFAULT_SETTINGS: Settings = {
   embedUrl: "",
   docReadChars: 12000,
   ocrUrl: "",
+  ocrProfile: "auto",
+  ocrPrompt: "",
+  ocrMaxTokens: 0,
+  ocrMegapixels: 0,
 };

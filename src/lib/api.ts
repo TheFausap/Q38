@@ -693,7 +693,15 @@ async function getSkills(path: string): Promise<Record<string, unknown>> {
 function libraryHeaders(settings: Settings, extra?: Record<string, string>): Record<string, string> {
   const h: Record<string, string> = { ...extra };
   if (settings.embedUrl.trim()) h["X-Q38-Embed-Url"] = settings.embedUrl.trim();
-  if (settings.ocrUrl.trim()) h["X-Q38-Ocr-Url"] = settings.ocrUrl.trim();
+  if (settings.ocrUrl.trim()) {
+    h["X-Q38-Ocr-Url"] = settings.ocrUrl.trim();
+    h["X-Q38-Ocr-Profile"] = settings.ocrProfile;
+    if (settings.ocrProfile === "custom") {
+      if (settings.ocrPrompt.trim()) h["X-Q38-Ocr-Prompt"] = encodeURIComponent(settings.ocrPrompt);
+      if (settings.ocrMaxTokens > 0) h["X-Q38-Ocr-Max-Tokens"] = String(settings.ocrMaxTokens);
+      if (settings.ocrMegapixels > 0) h["X-Q38-Ocr-Pixels"] = String(Math.round(settings.ocrMegapixels * 1_000_000));
+    }
+  }
   return h;
 }
 
@@ -724,6 +732,23 @@ export function libraryAdd(url: string, settings: Settings, opts: { ocr?: boolea
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ url, ocr: opts.ocr === true }),
   });
+}
+
+export type OcrInfo = {
+  ok: boolean;
+  configured: boolean;
+  base?: string;
+  profile?: string;
+  label?: string;
+  model?: string;
+  maxTokens?: number;
+  pixels?: number;
+  error?: string;
+};
+
+/** Which OCR profile the server will use — detected from the model, or as set. */
+export function libraryOcrInfo(settings: Settings): Promise<OcrInfo> {
+  return libraryCall<OcrInfo>("/api/library/ocr", settings);
 }
 
 export function libraryJobs(settings: Settings): Promise<{ ok: boolean; jobs?: LibraryJob[] }> {

@@ -17,6 +17,7 @@ import {
   libraryEmbed,
   libraryJobs,
   libraryList,
+  libraryOcrInfo,
   libraryReocr,
   libraryRead,
   librarySearch,
@@ -30,7 +31,7 @@ import {
   webFetchPage,
   webSearch,
 } from "./lib/api";
-import type { WireMessage } from "./lib/api";
+import type { OcrInfo, WireMessage } from "./lib/api";
 import {
   activeCompaction,
   cutIdOf,
@@ -286,6 +287,20 @@ export function App() {
   const [libDocs, setLibDocs] = useState<LibraryDoc[] | null>(null);
   const [libNotice, setLibNotice] = useState<string | null>(null);
   const [libBusy, setLibBusy] = useState<string | null>(null);
+  /** which OCR profile the server will use, for the Library tab */
+  const [ocrInfo, setOcrInfo] = useState<OcrInfo | null>(null);
+  useEffect(() => {
+    if (!settings.ocrUrl.trim()) {
+      setOcrInfo(null);
+      return;
+    }
+    let live = true;
+    void libraryOcrInfo(settings).then((info) => live && setOcrInfo(info));
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.ocrUrl, settings.ocrProfile, settings.ocrPrompt, settings.ocrMaxTokens, settings.ocrMegapixels]);
   /** the tools the last turn went out with, for the Server tab */
   const [lastTools, setLastTools] = useState<string[] | null>(null);
   /** OCR reads in progress on the server, polled while something may be running */
@@ -2674,6 +2689,7 @@ export function App() {
             onLibraryReload={() => void reloadLibrary()}
             libJobs={libJobs}
             lastTools={lastTools}
+            ocrInfo={ocrInfo}
             ocrOn={Boolean(settings.ocrUrl.trim())}
             onLibraryReocr={(id) => void reocrDoc(id)}
           />
@@ -2859,11 +2875,66 @@ function SettingsModal({
           <span>OCR server (blank = off)</span>
           <input
             type="url"
-            placeholder="http://127.0.0.1:8000 — PaddleOCR-VL on vLLM"
+            placeholder="http://127.0.0.1:8000 — OvisOCR2 or PaddleOCR-VL on vLLM"
             value={settings.ocrUrl}
             onChange={(e) => onChange({ ...settings, ocrUrl: e.target.value })}
           />
         </label>
+        {settings.ocrUrl.trim() && (
+          <label className="field">
+            <span>OCR profile</span>
+            <select
+              value={settings.ocrProfile}
+              onChange={(e) => onChange({ ...settings, ocrProfile: e.target.value as Settings["ocrProfile"] })}
+            >
+              <option value="auto">auto — from the served model's name</option>
+              <option value="ovisocr2">OvisOCR2 — whole pages, LaTeX formulas, ~4 MP</option>
+              <option value="paddleocr-vl">PaddleOCR-VL — "OCR:", ~1 MP</option>
+              <option value="custom">Custom — your prompt, tokens and resolution</option>
+            </select>
+          </label>
+        )}
+        {settings.ocrUrl.trim() && settings.ocrProfile === "custom" && (
+          <>
+            <label className="field">
+              <span>OCR instruction (sent after each page image)</span>
+              <textarea
+                rows={3}
+                value={settings.ocrPrompt}
+                placeholder="OCR:"
+                onChange={(e) => onChange({ ...settings, ocrPrompt: e.target.value })}
+              />
+            </label>
+            <div className="modal-row">
+              <label className="field">
+                <span>output tokens per page (0 = default)</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={32768}
+                  step={1024}
+                  value={settings.ocrMaxTokens}
+                  onChange={(e) =>
+                    onChange({ ...settings, ocrMaxTokens: Math.max(0, Math.min(32768, Number(e.target.value) || 0)) })
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>page megapixels (0 = default)</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={16}
+                  step={0.5}
+                  value={settings.ocrMegapixels}
+                  onChange={(e) =>
+                    onChange({ ...settings, ocrMegapixels: Math.max(0, Math.min(16, Number(e.target.value) || 0)) })
+                  }
+                />
+              </label>
+            </div>
+          </>
+        )}
         <div className="modal-row">
           <label className="field">
             <span>characters per document read</span>

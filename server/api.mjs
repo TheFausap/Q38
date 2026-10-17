@@ -1226,20 +1226,26 @@ function embedderFor(req) {
 /* the OCR server, cached per URL like the embedder */
 const ocrs = new Map();
 function ocrFor(req) {
-  const url = String(req.headers["x-q38-ocr-url"] || process.env.Q38_OCR_URL || "").trim();
+  const h = (name) => String(req.headers[name] || "").trim();
+  const url = h("x-q38-ocr-url") || String(process.env.Q38_OCR_URL || "").trim();
   if (!url) return null;
-  if (!ocrs.has(url)) {
-    ocrs.set(
-      url,
-      createOcr(url, {
-        apiKey: process.env.Q38_OCR_API_KEY || "",
-        model: process.env.Q38_OCR_MODEL || "",
-        prompt: process.env.Q38_OCR_PROMPT || undefined,
-        maxTokens: Number(process.env.Q38_OCR_MAX_TOKENS) || 4096,
-      }),
-    );
+  let prompt = "";
+  try {
+    prompt = decodeURIComponent(h("x-q38-ocr-prompt"));
+  } catch {
+    prompt = "";
   }
-  return ocrs.get(url);
+  const opts = {
+    apiKey: process.env.Q38_OCR_API_KEY || "",
+    model: process.env.Q38_OCR_MODEL || "",
+    profile: h("x-q38-ocr-profile") || process.env.Q38_OCR_PROFILE || "auto",
+    prompt: prompt || process.env.Q38_OCR_PROMPT || "",
+    maxTokens: Number(h("x-q38-ocr-max-tokens")) || Number(process.env.Q38_OCR_MAX_TOKENS) || 0,
+    pixels: Number(h("x-q38-ocr-pixels")) || Number(process.env.Q38_OCR_PIXELS) || 0,
+  };
+  const key = JSON.stringify([url, opts.profile, opts.prompt, opts.maxTokens, opts.pixels, opts.model]);
+  if (!ocrs.has(key)) ocrs.set(key, createOcr(url, opts));
+  return ocrs.get(key);
 }
 
 /* the inbox is scanned in the background: an OCR read can take minutes, and
@@ -1535,6 +1541,29 @@ export function createApi() {
             embedUrl: embedderFor(req)?.base || "",
             ocrUrl: ocrFor(req)?.base || "",
           });
+          return;
+        }
+        if (route === "ocr" && req.method === "GET") {
+          const ocr = ocrFor(req);
+          if (!ocr) {
+            sendJson(res, 200, { ok: true, configured: false });
+            return;
+          }
+          try {
+            const cfg = await ocr.settings();
+            sendJson(res, 200, {
+              ok: true,
+              configured: true,
+              base: ocr.base,
+              profile: cfg.name,
+              label: cfg.label,
+              model: cfg.model,
+              maxTokens: cfg.maxTokens,
+              pixels: cfg.pixels,
+            });
+          } catch (err) {
+            sendJson(res, 200, { ok: false, configured: true, base: ocr.base, error: err instanceof Error ? err.message : String(err) });
+          }
           return;
         }
         if (route === "jobs" && req.method === "GET") {

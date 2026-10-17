@@ -11,6 +11,7 @@ import { formatClock, formatRate, type JobTick, type PaceStats } from "../lib/pa
 import type { ArchiveRef, Compaction, ModeFamily, Sampling, ServerStatus, Settings } from "../lib/types";
 import { SKILL_INLINE_LIMIT, type SkillIndex } from "../lib/skills";
 import type { LibraryDoc, LibraryJob } from "../lib/library";
+import type { OcrInfo } from "../lib/api";
 
 export type InspectorTab = "construct" | "sample" | "context" | "library" | "server";
 
@@ -61,6 +62,7 @@ export function Inspector({
   onLibraryReload,
   libJobs,
   lastTools,
+  ocrInfo,
   ocrOn,
   onLibraryReocr,
 }: {
@@ -108,6 +110,7 @@ export function Inspector({
   onLibraryReload: () => void;
   libJobs: LibraryJob[];
   lastTools: string[] | null;
+  ocrInfo: OcrInfo | null;
   ocrOn: boolean;
   onLibraryReocr: (id: string) => void;
 }) {
@@ -659,13 +662,27 @@ export function Inspector({
 
           <div className="group-label">OCR</div>
           {ocrOn ? (
-            <p className="hint tiny">
-              Scanned PDFs are read with OCR automatically. “re-read with OCR” on a paper replaces its text
-              layer with the OCR model’s reading — slower, but faithful equations and tables.
-            </p>
+            <>
+              {ocrInfo && !ocrInfo.ok ? (
+                <p className="hint tiny warn-text">{ocrInfo.error}</p>
+              ) : ocrInfo?.label ? (
+                <p className="hint tiny">
+                  <strong>{ocrInfo.label}</strong>
+                  {settings.ocrProfile === "auto" ? ` — detected from ${ocrInfo.model}` : ` on ${ocrInfo.model}`} ·{" "}
+                  {((ocrInfo.pixels ?? 0) / 1e6).toFixed(1)} MP pages · up to {Math.round((ocrInfo.maxTokens ?? 0) / 1024)}k
+                  tokens a page
+                </p>
+              ) : (
+                <p className="hint tiny">Asking the OCR server which model it serves…</p>
+              )}
+              <p className="hint tiny">
+                Scanned PDFs are read with OCR automatically. “re-read with OCR” on a paper replaces its text
+                layer with the OCR model’s reading — slower, but faithful equations and tables.
+              </p>
+            </>
           ) : (
             <p className="hint tiny">
-              Off. Set an OCR server in Setup (PaddleOCR-VL on vLLM) to read scans and maths-heavy papers.
+              Off. Set an OCR server in Setup (OvisOCR2 or PaddleOCR-VL on vLLM) to read scans and maths-heavy papers.
             </p>
           )}
 

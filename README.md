@@ -250,17 +250,26 @@ garbled** — the prose and structure are faithful, the maths is not. Scans and 
 papers are what OCR (below) is for.
 
 **OCR (scans, and papers whose maths matters).** Point Setup → *OCR server* (or
-`Q38_OCR_URL`) at an OpenAI-compatible vision endpoint serving an OCR model — PaddleOCR-VL
-under vLLM is what it is built for:
+`Q38_OCR_URL`) at an OpenAI-compatible vision endpoint serving an OCR model. Each page is
+rendered by pdf.js and sent as an image with an instruction; how depends on the **OCR
+profile**, which by default is picked from the model name the server reports:
+
+| Profile | Instruction | Page size | Output | Notes |
+| --- | --- | --- | --- | --- |
+| **OvisOCR2** | its own whole-page instruction (verbatim from the model card) | ~4 MP (up to 2880²) | 16k tokens, LaTeX formulas, HTML tables | thinking off; figure placeholders dropped; best formula scores of the small models, and it reads whole pages end to end — the way Q38 sends them |
+| **PaddleOCR-VL** | `OCR:` | ~1 MP (its ceiling) | 4k tokens | strong on text in many languages; its formula strength needs Paddle's own layout pipeline, which Q38 does not run |
+| **Custom** | yours | yours | yours | for any other model |
 
 ```bash
+vllm serve ATH-MaaS/OvisOCR2                                   # or:
 vllm serve PaddlePaddle/PaddleOCR-VL --trust-remote-code \
   --max-num-batched-tokens 16384 --no-enable-prefix-caching --mm-processor-cache-gb 0
 ```
 
-Each page is rendered by pdf.js at about one megapixel (the model's own ceiling is
-1,003,520 pixels) and sent as `[image, "OCR:"]` at temperature 0, two pages in flight.
-Then:
+The Library tab shows what was detected (*OvisOCR2 — detected from ATH-MaaS/OvisOCR2 · 4.0 MP
+pages · up to 16k tokens a page*). A long page that ends in a runaway repeated fragment is
+cut back to one copy, and a vLLM build that refuses a profile's extra request fields gets the
+page again without them. Then:
 
 - a PDF with **no usable text layer** is read with OCR automatically instead of being refused;
 - any stored PDF can be **re-read with OCR** from the Library tab — same id, new text,
@@ -271,8 +280,11 @@ Then:
 OCR takes seconds per page instead of a second per paper, so the Library tab and the live
 strip show *OCR page 12/52* while it runs. A page that fails twice is skipped and named in
 the note; more than a quarter failing fails the read and leaves the document as it was.
-`Q38_OCR_MODEL`, `Q38_OCR_PROMPT` (default `OCR:`) and `Q38_OCR_MAX_TOKENS` (4096) override
-the defaults. Page rendering uses `@napi-rs/canvas`, which pdf.js installs with it.
+The environment can set the same things for a headless start: `Q38_OCR_PROFILE`
+(`auto`, `ovisocr2`, `paddleocr-vl`, `custom`), `Q38_OCR_PROMPT`, `Q38_OCR_MAX_TOKENS`,
+`Q38_OCR_PIXELS`, `Q38_OCR_MODEL`. The OCR server may be on your own network — it is a
+configured endpoint, like llama-server, not something the model chose to fetch. Page
+rendering uses `@napi-rs/canvas`, which pdf.js installs with it.
 
 **Search.** Keyword ranking (BM25) always — exact terms matter in technical writing and it
 needs nothing running. Add an embeddings server and search also matches by meaning, the two
@@ -324,8 +336,11 @@ npm run test:ui      # the whole workbench in jsdom, against a stub model
   section reads by the paper's own numbers, budgets and continuation; dedupe, the inbox,
   removal; hybrid search against a stub embeddings server and the fallback when it is down;
   arXiv/OpenReview links; every route, including the download guard and size limit; and OCR
-  against a stub vLLM server — scans read automatically, `ocr=true`, re-reading in place,
-  progress, the request's shape and image size, a failing page, a dead server.
+  against stub vLLM servers — scans read automatically, `ocr=true`, re-reading in place,
+  progress, the request's shape and image size, a failing page, a dead server; the OvisOCR2
+  profile picked from the model id (its instruction, thinking off, 16k tokens, ~4 MP pages),
+  Polish and LaTeX intact, placeholders and runaway tails cleaned, a server that refuses the
+  extra fields, and a Custom profile's own prompt, budget and resolution.
 - `tests/ui.mjs` — the whole app in jsdom against `server/api.mjs`, a stub
   llama-server and a stub SearXNG: a full window archives instead of summarising, the
   register (not the bodies) goes out in the prompt, a turn recalls what it needs and an

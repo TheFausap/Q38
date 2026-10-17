@@ -33,6 +33,7 @@ const STUB = 18600 + Math.floor(Math.random() * 300);
 const EMBED = STUB + 1;
 const API = STUB + 2;
 const OCR = STUB + 3;
+const OVIS = STUB + 4;
 const stub = http.createServer((req, res) => {
   if (req.url === "/paper.pdf") {
     res.writeHead(200, { "Content-Type": "application/pdf", "Content-Length": paper.length });
@@ -119,6 +120,34 @@ const ocrServer = http.createServer((req, res) => {
   });
 });
 await new Promise((r) => ocrServer.listen(OCR, "127.0.0.1", r));
+
+/* an OvisOCR2 stand-in: Markdown with LaTeX, a figure placeholder to drop,
+   and (on page 2) a runaway repeated tail to trim. `ovisMode.strict` refuses
+   requests carrying extra fields, like an older vLLM would. */
+const ovisRequests = [];
+const ovisMode = { strict: false };
+const ovisServer = http.createServer((req, res) => {
+  if (req.url === "/v1/models") return res.end(JSON.stringify({ data: [{ id: "ATH-MaaS/OvisOCR2" }] }));
+  let body = "";
+  req.on("data", (c) => (body += c));
+  req.on("end", () => {
+    const j = JSON.parse(body);
+    ovisRequests.push(j);
+    if (ovisMode.strict && (j.mm_processor_kwargs || j.chat_template_kwargs)) {
+      res.writeHead(400);
+      return res.end('{"error":"unexpected field mm_processor_kwargs"}');
+    }
+    const n = ovisRequests.length;
+    const page =
+      n === 1
+        ? '# Pamięć ciągła\n\nZażółć gęślą jaźń: każdy blok ma własną częstotliwość.\n\n<img src="images/bbox_100_200_900_600.jpg" />\n\n$$\\theta_{i+1}^{(f_\\ell)} = \\theta_i^{(f_\\ell)} - \\eta_t^{(\\ell)} g_t$$\n\n' +
+          "Dalszy tekst opisu metody. ".repeat(15)
+        : `## ${n} Wyniki\n\n${"Wyniki są stabilne. ".repeat(380)}${"ab".repeat(400)}`;
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ choices: [{ index: 0, message: { role: "assistant", content: page } }] }));
+  });
+});
+await new Promise((r) => ovisServer.listen(OVIS, "127.0.0.1", r));
 const api = createApi();
 const server = http.createServer((req, res) => api(req, res, () => res.end("{}")));
 await new Promise((r) => server.listen(API, "127.0.0.1", r));
@@ -399,6 +428,69 @@ try {
     check(off.status === 422 && /no OCR server/.test(off.json.error), "re-reading with no OCR server set is refused");
   }
 
+  /* ---------------------------------------------------- OCR profiles */
+  {
+    const { OVIS_PROMPT, cleanTruncatedRepeats, profileForModel } = await import("../server/ocr.mjs");
+    check(profileForModel("ATH-MaaS/OvisOCR2") === "ovisocr2" && profileForModel("PaddleOCR-VL-0.9B") === "paddleocr-vl", "profiles are picked from the model id");
+    const runaway = "Real text. ".repeat(800) + "xyz".repeat(300);
+    const trimmed = cleanTruncatedRepeats(runaway);
+    check(trimmed.length < runaway.length - 800 && trimmed.startsWith("Real text.") && trimmed.endsWith("xyz"), "a runaway repeated tail is cut back");
+    check(cleanTruncatedRepeats("short " + "ab".repeat(100)) === "short " + "ab".repeat(100), "short pages are left alone");
+
+    /* start empty: the same scan read by another model above would be deduplicated */
+    for (const d of (await call("/api/library/list")).json.docs) await post("/api/library/remove", { id: d.id });
+    const ovis = { "X-Q38-Ocr-Url": `http://127.0.0.1:${OVIS}/v1` };
+    const info = await call("/api/library/ocr", { headers: ovis });
+    check(info.json.profile === "ovisocr2" && info.json.label === "OvisOCR2" && info.json.model === "ATH-MaaS/OvisOCR2", "GET /api/library/ocr reports the detected profile");
+    check((await call("/api/library/ocr")).json.configured === false, "and says when no OCR server is set");
+
+    const scan = await post("/api/library/add", { url: `http://127.0.0.1:${STUB}/scan.pdf` }, ovis);
+    check(scan.status === 200 && scan.json.doc.extractor === "ocr:ATH-MaaS/OvisOCR2", `a scan is read by OvisOCR2 (${scan.json.error || scan.json.doc?.extractor})`);
+    const r0 = ovisRequests[0];
+    check(r0.messages[0].content[1].text === OVIS_PROMPT && OVIS_PROMPT.startsWith("\nExtract all readable content"), "with its own instruction, verbatim");
+    check(r0.messages[0].content[0].type === "image_url", "image first, as its chat template expects");
+    check(r0.max_tokens === 16384 && r0.temperature === 0, "16k output tokens, temperature 0");
+    check(r0.chat_template_kwargs?.enable_thinking === false, "thinking off");
+    check(r0.mm_processor_kwargs?.images_kwargs?.max_pixels === 2880 * 2880, "and its processor's pixel range");
+    const png = Buffer.from(r0.messages[0].content[0].image_url.url.split(",")[1], "base64");
+    const px = png.readUInt32BE(16) * png.readUInt32BE(20);
+    check(px > 3_500_000 && px <= 4_000_000, `pages rendered at ~4 MP for it (${(px / 1e6).toFixed(2)} MP)`);
+    check(scan.json.doc.title === "Pamięć ciągła", `Polish survives the round trip (${scan.json.doc.title})`);
+    const text = (await call(`/api/library/read?doc=${scan.json.doc.id}&chunk=0&chars=20000`)).json.text;
+    check(/Zażółć gęślą jaźń/.test(text), "diacritics intact");
+    check(/\\theta_\{i\+1\}\^\{\(f_\\ell\)\}/.test(text), "LaTeX kept as written, ℓ and all");
+    check(!/images\/bbox_/.test(text), "figure placeholders dropped");
+
+    /* an older vLLM that refuses the extra fields: the page is still read */
+    ovisMode.strict = true;
+    ovisRequests.length = 0;
+    const strictHdr = { ...ovis, "X-Q38-Ocr-Profile": "ovisocr2", "X-Q38-Ocr-Max-Tokens": "16000" };
+    const forced = await post("/api/library/add", { url: `http://127.0.0.1:${STUB}/paper.pdf`, ocr: true }, strictHdr);
+    ovisMode.strict = false;
+    check(forced.status === 200 && forced.json.doc.extractor.startsWith("ocr:"), "a server that refuses the extra fields still gets every page read");
+    check(ovisRequests.some((r) => !r.mm_processor_kwargs) && ovisRequests.filter((r) => r.mm_processor_kwargs).length === 1, "it is asked once with them, then without");
+    const longPage = (await call(`/api/library/read?doc=${forced.json.doc.id}&chars=40000&chunk=0`)).json.text;
+    check(!/(ab){60}/.test(longPage), "the runaway tail never reaches the library");
+
+    /* custom: the user's own prompt, budget and resolution */
+    ovisRequests.length = 0;
+    await post("/api/library/remove", { id: forced.json.doc.id });
+    const custom = {
+      ...ovis,
+      "X-Q38-Ocr-Profile": "custom",
+      "X-Q38-Ocr-Prompt": encodeURIComponent("Przepisz tę stronę jako Markdown."),
+      "X-Q38-Ocr-Max-Tokens": "2048",
+      "X-Q38-Ocr-Pixels": "2000000",
+    };
+    const c = await post("/api/library/add", { url: `http://127.0.0.1:${STUB}/paper.pdf`, ocr: true }, custom);
+    const cr = ovisRequests[0];
+    check(c.status === 200 && cr.messages[0].content[1].text === "Przepisz tę stronę jako Markdown.", "custom: the prompt is sent as typed, Polish included");
+    check(cr.max_tokens === 2048 && !cr.mm_processor_kwargs, "custom: its budget, and no model-specific fields");
+    const cpng = Buffer.from(cr.messages[0].content[0].image_url.url.split(",")[1], "base64");
+    const cpx = cpng.readUInt32BE(16) * cpng.readUInt32BE(20);
+    check(cpx > 1_700_000 && cpx <= 2_000_000, `custom: its resolution (${(cpx / 1e6).toFixed(2)} MP)`);
+  }
+
   console.log(results.join("\n"));
   console.log(`library checks passed (${results.length})`);
 } catch (err) {
@@ -410,6 +502,7 @@ try {
   stub.close();
   embed.close();
   ocrServer.close();
+  ovisServer.close();
   fs.rmSync(tmp, { recursive: true, force: true });
   process.exit(process.exitCode || 0);
 }
