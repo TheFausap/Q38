@@ -25,6 +25,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { ocrPdf } from "./ocr.mjs";
 
 /** Bytes a single document may have. */
 export const LIBRARY_MAX_BYTES = 50 * 1024 * 1024;
@@ -241,6 +242,86 @@ export async function extractPdf(bytes) {
   } finally {
     await doc.destroy().catch(() => {});
   }
+}
+
+/**
+ * OCR output as blocks. There are no font sizes here, so a heading is a
+ * Markdown `#` line or a line that is numbered or a known section name. Lines
+ * repeated on many pages (running heads) and lone page numbers are dropped;
+ * a table the model wrote as HTML becomes ` | `-separated rows.
+ */
+export function blocksFromOcr(pageTexts) {
+  const cleaned = pageTexts.map(({ page, text }) => ({
+    page,
+    lines: String(text || "")
+      .replace(/<\/(td|th)>\s*/gi, " | ")
+      .replace(/<\/tr>\s*/gi, "\n")
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/g, " ")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .split("\n")
+      .map((l) => l.replace(/[ \t]+/g, " ").trim()),
+  }));
+  const seen = new Map();
+  for (const p of cleaned) for (const l of new Set(p.lines)) if (l && l.length < 90) seen.set(l, (seen.get(l) ?? 0) + 1);
+  const repeated = new Set(
+    [...seen].filter(([, n]) => cleaned.length >= 4 && n >= Math.max(3, cleaned.length * 0.3)).map(([t]) => t),
+  );
+
+  const blocks = [];
+  let title = "";
+  for (const { page, lines } of cleaned) {
+    let para = [];
+    const endPara = () => {
+      const text = joinLines(para);
+      if (text) blocks.push({ kind: "text", text, page });
+      para = [];
+    };
+    for (const line of lines) {
+      if (!line) {
+        endPara();
+        continue;
+      }
+      if (repeated.has(line) || /^\d{1,4}$/.test(line) || /^arxiv:\s*\d/i.test(line)) continue;
+      const md = /^(#{1,6})\s+(.+?)\s*#*$/.exec(line);
+      const text = md ? md[2].replace(/\*\*/g, "").trim() : line;
+      if (md && page === 1 && !title && md[1].length === 1 && !/^\d/.test(text) && !HEADING_WORDS.test(text)) {
+        endPara();
+        title = text;
+        continue;
+      }
+      if ((md && text.length <= 140 && !looksLikeMath(text)) || headingKind(text, 10, 10) === "structural") {
+        endPara();
+        blocks.push({ kind: "heading", text, page });
+        continue;
+      }
+      para.push(line);
+      if (line.length < 55 && /[.!?:]$/.test(line)) endPara();
+    }
+    endPara();
+  }
+  if (!title) {
+    const first = blocks.find((b) => b.page === 1 && b.kind === "text" && b.text.length >= 10 && b.text.length <= 200);
+    title = first ? first.text.split(/(?<=[.!?])\s/)[0].slice(0, 160) : "";
+  }
+  return { title, blocks };
+}
+
+/** A PDF read page by page by the OCR model instead of from its text layer. */
+export async function extractPdfOcr(bytes, ocr, { onProgress, maxPages } = {}) {
+  const out = await ocrPdf(bytes, ocr, { onProgress, maxPages });
+  const { title, blocks } = blocksFromOcr(out.texts);
+  return {
+    kind: "pdf",
+    title,
+    pages: out.pages,
+    blocks,
+    extractor: `ocr:${out.model}`,
+    ocr: { model: out.model, read: out.read, failed: out.failed },
+  };
 }
 
 /** HTML as blocks, keeping h1–h6 as headings. */
@@ -475,6 +556,17 @@ export function createLibrary({ root, download, htmlToText, titleOf }) {
   const inboxDir = path.join(root, "inbox");
   let cache = null; // { docs: [{meta, chunks, vectors}], bm25 }
   let queue = Promise.resolve();
+  /** Long reads in progress (OCR), for the UI: key → { label, done, total, startedAt } */
+  const jobs = new Map();
+  let jobSeq = 0;
+  const startJob = (label) => {
+    const key = `job-${++jobSeq}`;
+    jobs.set(key, { key, label, done: 0, total: 0, startedAt: Date.now() });
+    return {
+      progress: ({ done, total }) => Object.assign(jobs.get(key) ?? {}, { done, total }),
+      end: () => jobs.delete(key),
+    };
+  };
 
   /** One write at a time: two adds racing would each rebuild a stale index. */
   const serial = (fn) => {
@@ -583,6 +675,7 @@ export function createLibrary({ root, download, htmlToText, titleOf }) {
       sections: m.sections.length,
       addedAt: m.addedAt,
       embedded: d.vectors ? m.embed.model : null,
+      extractor: m.extractor || "text",
     };
   }
 
@@ -617,19 +710,49 @@ export function createLibrary({ root, download, htmlToText, titleOf }) {
     return { model, dim };
   }
 
+  /**
+   * A PDF's blocks: from its text layer, or through OCR when asked (`forceOcr`)
+   * or when there is no text layer to speak of and an OCR server is set.
+   */
+  async function readPdf(bytes, { ocr, forceOcr, label }) {
+    const runOcr = async (why) => {
+      const job = startJob(label);
+      try {
+        const x = await extractPdfOcr(bytes, ocr, { onProgress: job.progress });
+        return { ...x, why };
+      } finally {
+        job.end();
+      }
+    };
+    if (forceOcr) {
+      if (!ocr) throw new Error("no OCR server is configured (Setup → OCR server)");
+      const layer = await extractPdf(bytes).catch(() => null);
+      const x = await runOcr("read with OCR on request");
+      /* the text layer's title (metadata or the masthead) beats a guess from OCR */
+      return { ...x, title: layer?.title && layer.title.length >= 6 ? layer.title : x.title };
+    }
+    const layer = await extractPdf(bytes);
+    const layerChars = layer.blocks.reduce((n, b) => n + b.text.length, 0);
+    if (layerChars >= 200 && layerChars >= layer.pages * 40) return { ...layer, extractor: "text" };
+    if (!ocr) return { ...layer, extractor: "text" }; // too little text: the caller says why
+    const x = await runOcr("no usable text layer, so it was read with OCR");
+    return { ...x, title: layer.title && layer.title.length >= 6 ? layer.title : x.title };
+  }
+
   /** Bytes in, a stored document out. Same bytes twice → the same document. */
-  async function ingest({ bytes, type = "", name = "", source = "", embedder = null }) {
+  async function ingest({ bytes, type = "", name = "", source = "", embedder = null, ocr = null, forceOcr = false }) {
     if (!bytes?.length) return { ok: false, error: "the document is empty" };
-    if (bytes.length > LIBRARY_MAX_BYTES) return { ok: false, error: `it is over the ${LIBRARY_MAX_BYTES / 1e6} MB limit` };
+    if (bytes.length > LIBRARY_MAX_BYTES) return { ok: false, error: `it is over the ${LIBRARY_MAX_BYTES / 1048576} MB limit` };
     const hash = crypto.createHash("sha256").update(bytes).digest("hex");
     const existing = load().docs.find((d) => d.meta.sha256 === hash);
     if (existing) return { ok: true, existing: true, doc: summary(existing), outline: existing.meta.sections };
 
     const kind = detectKind({ bytes, type, name });
     if (!kind) return { ok: false, error: `cannot read ${type || name || "that file"}: PDF, HTML, Markdown and plain text only` };
+    if (kind !== "pdf" && forceOcr) return { ok: false, error: "OCR is for PDFs; this is " + kind };
     let extracted;
     try {
-      if (kind === "pdf") extracted = await extractPdf(bytes);
+      if (kind === "pdf") extracted = await readPdf(bytes, { ocr, forceOcr, label: name || source || "a PDF" });
       else if (kind === "html") extracted = extractHtml(bytes.toString("utf8"), { htmlToText, titleOf });
       else extracted = extractText(bytes.toString("utf8"), kind);
     } catch (err) {
@@ -641,9 +764,11 @@ export function createLibrary({ root, download, htmlToText, titleOf }) {
       return {
         ok: false,
         error:
-          kind === "pdf"
-            ? "the PDF has almost no text layer (a scan?) — it would need OCR first"
-            : "there is almost no text in it",
+          kind !== "pdf"
+            ? "there is almost no text in it"
+            : extracted.ocr
+              ? "even OCR found almost no text in it"
+              : "the PDF has almost no text layer (a scan?) — set an OCR server in Setup to read it",
       };
     }
     const title = (extracted.title || path.basename(String(name || source || ""), path.extname(String(name || ""))) || "untitled")
@@ -663,6 +788,8 @@ export function createLibrary({ root, download, htmlToText, titleOf }) {
       sections,
       addedAt: new Date().toISOString(),
       embed: null,
+      extractor: extracted.extractor || "text",
+      ocrFailedPages: extracted.ocr?.failed?.length ? extracted.ocr.failed : undefined,
     };
     const ext = kind === "pdf" ? ".pdf" : kind === "html" ? ".html" : kind === "md" ? ".md" : ".txt";
     fs.writeFileSync(path.join(dir, `source${ext}`), bytes);
@@ -679,30 +806,98 @@ export function createLibrary({ root, download, htmlToText, titleOf }) {
     }
     invalidate();
     const stored = load().docs.find((d) => d.meta.id === id);
-    return { ok: true, existing: false, doc: summary(stored), outline: sections, note: embedNote || undefined };
+    const notes = [
+      extracted.why || "",
+      extracted.ocr?.failed?.length ? `OCR could not read page${extracted.ocr.failed.length === 1 ? "" : "s"} ${extracted.ocr.failed.join(", ")}` : "",
+      embedNote,
+    ].filter(Boolean);
+    return { ok: true, existing: false, doc: summary(stored), outline: sections, note: notes.join("; ") || undefined };
   }
 
   return {
     root,
 
     list() {
-      return { ok: true, root, docs: load().docs.map(summary) };
+      return { ok: true, root, docs: load().docs.map(summary), jobs: [...jobs.values()] };
+    },
+
+    /** Long reads in progress, for a progress line. */
+    jobs() {
+      return [...jobs.values()];
     },
 
     addBytes(opts) {
       return serial(() => ingest(opts));
     },
 
-    async addUrl(raw, { embedder = null } = {}) {
+    async addUrl(raw, { embedder = null, ocr = null, forceOcr = false } = {}) {
       const target = documentUrl(raw);
       const got = await download(target);
       if (!got.ok) return { ok: false, error: got.error };
       const name = decodeURIComponent(new URL(got.finalUrl).pathname.split("/").pop() || "");
-      return serial(() => ingest({ bytes: got.bytes, type: got.type, name, source: got.finalUrl, embedder }));
+      return serial(() => ingest({ bytes: got.bytes, type: got.type, name, source: got.finalUrl, embedder, ocr, forceOcr }));
+    },
+
+    /**
+     * Read a stored PDF again through OCR — for papers whose text layer mangles
+     * the maths. Same id, same added date; new chunks, outline and vectors.
+     */
+    reocr(id, { ocr, embedder = null } = {}) {
+      return serial(async () => {
+        if (!ocr) return { ok: false, error: "no OCR server is configured (Setup → OCR server)" };
+        const d = load().docs.find((x) => x.meta.id === id);
+        if (!d) return { ok: false, error: `no document ${id}` };
+        if (d.meta.kind !== "pdf") return { ok: false, error: "only PDFs can be read with OCR" };
+        const dir = path.join(docsDir, d.meta.id);
+        let bytes;
+        try {
+          bytes = fs.readFileSync(path.join(dir, "source.pdf"));
+        } catch {
+          return { ok: false, error: "the original PDF is not in the library any more — add it again" };
+        }
+        let x;
+        const job = startJob(d.meta.title);
+        try {
+          x = await extractPdfOcr(bytes, ocr, { onProgress: job.progress });
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        } finally {
+          job.end();
+        }
+        const { chunks, sections } = chunkBlocks(x.blocks);
+        const chars = chunks.reduce((n, c) => n + c.text.length, 0);
+        if (chars < 200) return { ok: false, error: "OCR found almost no text — the document was left as it was" };
+        const meta = {
+          ...d.meta,
+          pages: x.pages,
+          chars,
+          sections,
+          extractor: x.extractor,
+          ocrFailedPages: x.ocr.failed.length ? x.ocr.failed : undefined,
+          rereadAt: new Date().toISOString(),
+          embed: null,
+        };
+        fs.rmSync(path.join(dir, "vectors.f32"), { force: true });
+        fs.writeFileSync(path.join(dir, "chunks.json"), JSON.stringify(chunks));
+        fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify(meta, null, 2));
+        let note = x.ocr.failed.length
+          ? `OCR could not read page${x.ocr.failed.length === 1 ? "" : "s"} ${x.ocr.failed.join(", ")}`
+          : "";
+        if (embedder) {
+          try {
+            await embedDoc(dir, meta, chunks, embedder);
+          } catch (err) {
+            note = [note, `stored without embeddings: ${err instanceof Error ? err.message : err}`].filter(Boolean).join("; ");
+          }
+        }
+        invalidate();
+        const stored = load().docs.find((y) => y.meta.id === id);
+        return { ok: true, doc: summary(stored), outline: sections, before: d.chunks.length, note: note || undefined };
+      });
     },
 
     /** Files dropped into <root>/inbox are read in and moved out of the way. */
-    scanInbox({ embedder = null } = {}) {
+    scanInbox({ embedder = null, ocr = null } = {}) {
       return serial(async () => {
         let names = [];
         try {
@@ -716,7 +911,7 @@ export function createLibrary({ root, download, htmlToText, titleOf }) {
         for (const n of names) {
           const full = path.join(inboxDir, n);
           if (!fs.statSync(full).isFile()) continue;
-          const out = await ingest({ bytes: fs.readFileSync(full), name: n, source: n, embedder });
+          const out = await ingest({ bytes: fs.readFileSync(full), name: n, source: n, embedder, ocr });
           if (out.ok) {
             fs.rmSync(full, { force: true });
             added.push(out.doc.title);

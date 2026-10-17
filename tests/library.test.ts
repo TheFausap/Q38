@@ -45,6 +45,10 @@ const doc = (i: number): LibraryDoc => ({
   const many = libraryTools(Array.from({ length: LIBRARY_INLINE_LIMIT + 7 }, (_, i) => doc(i))) as Tool[];
   assert.match(many[1].function.description, /holds 37 documents \(the 30 most recent listed\)/, "a big library is capped");
   assert.match(two[2].function.description, /paper's own number/, "doc_read explains section numbers");
+  assert.ok(!("ocr" in two[0].function.parameters.properties), "no ocr option without an OCR server");
+  const withOcr = libraryTools([], { ocr: true }) as Tool[];
+  assert.ok("ocr" in withOcr[0].function.parameters.properties, "doc_add gains ocr=true when one is set");
+  assert.match(withOcr[0].function.description, /takes minutes, not seconds/, "and is told what it costs");
 }
 
 /* ---------------------------------------------------------- read-backs */

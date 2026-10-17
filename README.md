@@ -245,9 +245,34 @@ larger than the body — unless it is display maths, the arXiv side stamp or a r
 Running heads, page numbers and end-of-line hyphens are cleaned up. Chunks are ~1.4k
 characters, cut at sentence ends, and never straddle two sections. The Nested Learning paper
 (52 pages) reads in about a second into 171 chunks with the paper's own 39-section outline.
-Limits: 50 MB per document; scanned PDFs with no text layer are refused (they need OCR); and
-**equations, tables and figures come through as garbled text** — the prose and structure are
-faithful, the maths is not.
+Limits: 50 MB per document; from the text layer, **equations and tables come through
+garbled** — the prose and structure are faithful, the maths is not. Scans and maths-heavy
+papers are what OCR (below) is for.
+
+**OCR (scans, and papers whose maths matters).** Point Setup → *OCR server* (or
+`Q38_OCR_URL`) at an OpenAI-compatible vision endpoint serving an OCR model — PaddleOCR-VL
+under vLLM is what it is built for:
+
+```bash
+vllm serve PaddlePaddle/PaddleOCR-VL --trust-remote-code \
+  --max-num-batched-tokens 16384 --no-enable-prefix-caching --mm-processor-cache-gb 0
+```
+
+Each page is rendered by pdf.js at about one megapixel (the model's own ceiling is
+1,003,520 pixels) and sent as `[image, "OCR:"]` at temperature 0, two pages in flight.
+Then:
+
+- a PDF with **no usable text layer** is read with OCR automatically instead of being refused;
+- any stored PDF can be **re-read with OCR** from the Library tab — same id, new text,
+  outline and vectors — which is the fix for papers whose equations the text layer mangles:
+  OCR keeps them as LaTeX (`\theta_{t+1} = \theta_t - \eta g_t`) and tables as rows;
+- the model's `doc_add` gains `ocr=true` for the same thing, described to it as slow.
+
+OCR takes seconds per page instead of a second per paper, so the Library tab and the live
+strip show *OCR page 12/52* while it runs. A page that fails twice is skipped and named in
+the note; more than a quarter failing fails the read and leaves the document as it was.
+`Q38_OCR_MODEL`, `Q38_OCR_PROMPT` (default `OCR:`) and `Q38_OCR_MAX_TOKENS` (4096) override
+the defaults. Page rendering uses `@napi-rs/canvas`, which pdf.js installs with it.
 
 **Search.** Keyword ranking (BM25) always — exact terms matter in technical writing and it
 needs nothing running. Add an embeddings server and search also matches by meaning, the two
@@ -298,7 +323,9 @@ npm run test:ui      # the whole workbench in jsdom, against a stub model
   the outline, running heads, hyphens, maths that is not a heading; chunking; BM25 search,
   section reads by the paper's own numbers, budgets and continuation; dedupe, the inbox,
   removal; hybrid search against a stub embeddings server and the fallback when it is down;
-  arXiv/OpenReview links; and every route, including the download guard and size limit.
+  arXiv/OpenReview links; every route, including the download guard and size limit; and OCR
+  against a stub vLLM server — scans read automatically, `ocr=true`, re-reading in place,
+  progress, the request's shape and image size, a failing page, a dead server.
 - `tests/ui.mjs` — the whole app in jsdom against `server/api.mjs`, a stub
   llama-server and a stub SearXNG: a full window archives instead of summarising, the
   register (not the bodies) goes out in the prompt, a turn recalls what it needs and an

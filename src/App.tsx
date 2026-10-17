@@ -15,7 +15,9 @@ import {
   memoryPut,
   libraryAdd,
   libraryEmbed,
+  libraryJobs,
   libraryList,
+  libraryReocr,
   libraryRead,
   librarySearch,
   libraryRemove,
@@ -58,6 +60,7 @@ import {
   searchTapeLine as librarySearchTapeLine,
   searchText as librarySearchText,
   type LibraryDoc,
+  type LibraryJob,
 } from "./lib/library";
 import {
   SKILL_MAX_LOADS_PER_TURN,
@@ -278,6 +281,8 @@ export function App() {
   const [libDocs, setLibDocs] = useState<LibraryDoc[] | null>(null);
   const [libNotice, setLibNotice] = useState<string | null>(null);
   const [libBusy, setLibBusy] = useState<string | null>(null);
+  /** OCR reads in progress on the server, polled while something may be running */
+  const [libJobs, setLibJobs] = useState<LibraryJob[]>([]);
   const [libRoot, setLibRoot] = useState("");
   const reloadLibrary = useCallback(async () => {
     const out = await libraryList(settings);
@@ -300,6 +305,26 @@ export function App() {
     }
     return out;
   }, [settings]);
+  /* while a read may be running, ask the server how far it has got */
+  const libraryActive = libBusy !== null || webActive?.kind === "library";
+  useEffect(() => {
+    if (!libraryActive) {
+      setLibJobs([]);
+      return;
+    }
+    let live = true;
+    const tick = async () => {
+      const out = await libraryJobs(settings);
+      if (live && out.ok) setLibJobs(out.jobs ?? []);
+    };
+    void tick();
+    const timer = setInterval(() => void tick(), 1500);
+    return () => {
+      live = false;
+      clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [libraryActive]);
   useEffect(() => {
     if (settings.library) void reloadLibrary();
     // the embedding URL changes which documents count as embedded
@@ -1383,13 +1408,14 @@ export function App() {
       };
       let changed = false;
       for (const call of addCalls) {
-        const url = String(argsOf(call.arguments).url ?? "").trim();
+        const addArgs = argsOf(call.arguments);
+        const url = String(addArgs.url ?? "").trim();
         if (!url) {
           texts.push("### Nothing to add\nThat doc_add call had no `url`.");
           continue;
         }
         setWebActive({ kind: "library", label: libraryActiveText("add", hostOf(url)) });
-        const out = await libraryAdd(url, settings);
+        const out = await libraryAdd(url, settings, { ocr: addArgs.ocr === true && Boolean(settings.ocrUrl.trim()) });
         texts.push(addText(url, out));
         setWebLine(addTapeLine(out));
         setLibNotice(
@@ -1470,6 +1496,17 @@ export function App() {
     setLibBusy("removing");
     const out = await libraryRemove(id, settings);
     setLibNotice(out.ok ? "Removed." : `Could not remove it: ${out.error}`);
+    setLibBusy(null);
+    void reloadLibrary();
+  };
+  const reocrDoc = async (id: string) => {
+    setLibBusy("reading with OCR");
+    const out = await libraryReocr(id, settings);
+    setLibNotice(
+      out.ok && out.doc
+        ? `Re-read “${out.doc.title}” with OCR — ${out.before} chunks before, ${out.doc.chunks} now, ${out.doc.sections} sections${out.note ? ` (${out.note})` : ""}.`
+        : `OCR failed: ${out.error}`,
+    );
     setLibBusy(null);
     void reloadLibrary();
   };
@@ -2031,7 +2068,7 @@ export function App() {
       if (onDisk && settings.recallTool) offered.push(RECALL_TOOL);
       if (settings.webSearch) offered.push(...WEB_TOOLS);
       if (settings.skills) offered.push(...skillTools(skills));
-      if (settings.library) offered.push(...libraryTools(libDocs ?? []));
+      if (settings.library) offered.push(...libraryTools(libDocs ?? [], { ocr: Boolean(settings.ocrUrl.trim()) }));
       tools = offered.length ? offered : undefined;
     } catch (err) {
       setFoldNotice(`Could not prepare the context: ${err instanceof Error ? err.message : String(err)}`);
@@ -2407,7 +2444,11 @@ export function App() {
           onFold={() => void foldNow()}
           onUnfold={unfold}
           folding={folding}
-          webActive={webActive}
+          webActive={
+            webActive?.kind === "library" && libJobs[0]?.total
+              ? { ...webActive, label: `${webActive.label} — OCR page ${libJobs[0].done}/${libJobs[0].total}` }
+              : webActive
+          }
           archives={archivedChunks}
           held={session.held ?? []}
           memRoot={memRoot}
@@ -2465,6 +2506,9 @@ export function App() {
             onLibraryRemove={(id) => void removeFromLibrary(id)}
             onLibraryEmbed={() => void embedLibrary()}
             onLibraryReload={() => void reloadLibrary()}
+            libJobs={libJobs}
+            ocrOn={Boolean(settings.ocrUrl.trim())}
+            onLibraryReocr={(id) => void reocrDoc(id)}
           />
         )}
       </div>
@@ -2636,6 +2680,15 @@ function SettingsModal({
               placeholder="http://127.0.0.1:8081"
               value={settings.embedUrl}
               onChange={(e) => onChange({ ...settings, embedUrl: e.target.value })}
+            />
+          </label>
+          <label className="field">
+            <span>OCR server (blank = off)</span>
+            <input
+              type="url"
+              placeholder="http://127.0.0.1:8000 — PaddleOCR-VL on vLLM"
+              value={settings.ocrUrl}
+              onChange={(e) => onChange({ ...settings, ocrUrl: e.target.value })}
             />
           </label>
           <label className="field">

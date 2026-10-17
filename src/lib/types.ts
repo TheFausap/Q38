@@ -227,6 +227,8 @@ export type Settings = {
   embedUrl: string;
   /** characters one doc_read may bring into the prompt */
   docReadChars: number;
+  /** an OpenAI-compatible vision endpoint serving an OCR model (PaddleOCR-VL on vLLM); blank = off */
+  ocrUrl: string;
 };
 
 export type SearchProvider = "auto" | "searx" | "brave" | "tavily" | "duckduckgo";
@@ -297,4 +299,5 @@ export const DEFAULT_SETTINGS: Settings = {
   library: true,
   embedUrl: "",
   docReadChars: 12000,
+  ocrUrl: "",
 };

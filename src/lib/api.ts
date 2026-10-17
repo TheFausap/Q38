@@ -10,7 +10,7 @@ import type {
 } from "./types";
 import type { WebPageOutcome, WebSearchOutcome } from "./web";
 import type { SkillIndex, SkillReadOutcome, SkillSearchOutcome } from "./skills";
-import type { AddOutcome, LibraryList, ReadOutcome, SearchOutcome } from "./library";
+import type { AddOutcome, LibraryJob, LibraryList, ReadOutcome, SearchOutcome } from "./library";
 
 export type StreamHandlers = {
   onReasoning: (chunk: string) => void;
@@ -678,6 +678,7 @@ async function getSkills(path: string): Promise<Record<string, unknown>> {
 function libraryHeaders(settings: Settings, extra?: Record<string, string>): Record<string, string> {
   const h: Record<string, string> = { ...extra };
   if (settings.embedUrl.trim()) h["X-Q38-Embed-Url"] = settings.embedUrl.trim();
+  if (settings.ocrUrl.trim()) h["X-Q38-Ocr-Url"] = settings.ocrUrl.trim();
   return h;
 }
 
@@ -702,11 +703,23 @@ export function libraryList(settings: Settings): Promise<LibraryList> {
   return libraryCall<LibraryList>("/api/library/list", settings);
 }
 
-export function libraryAdd(url: string, settings: Settings): Promise<AddOutcome> {
+export function libraryAdd(url: string, settings: Settings, opts: { ocr?: boolean } = {}): Promise<AddOutcome> {
   return libraryCall<AddOutcome>("/api/library/add", settings, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url }),
+    body: JSON.stringify({ url, ocr: opts.ocr === true }),
+  });
+}
+
+export function libraryJobs(settings: Settings): Promise<{ ok: boolean; jobs?: LibraryJob[] }> {
+  return libraryCall("/api/library/jobs", settings);
+}
+
+export function libraryReocr(id: string, settings: Settings): Promise<AddOutcome & { before?: number }> {
+  return libraryCall("/api/library/reocr", settings, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
   });
 }
 

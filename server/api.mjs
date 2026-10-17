@@ -5,6 +5,7 @@ import https from "node:https";
 import os from "node:os";
 import path from "node:path";
 import { createEmbedder, createLibrary, LIBRARY_MAX_BYTES } from "./library.mjs";
+import { createOcr } from "./ocr.mjs";
 import { currentIndex, publicIndex, readSkill, searchSkills } from "./skills.mjs";
 
 const SKIP_DIRS = new Set([
@@ -1109,7 +1110,7 @@ async function openGuarded(start, { headers, signal }) {
 /** Read a response body as bytes, refusing (not trimming) past `limit`. */
 async function readBytesCapped(res, limit) {
   const declared = Number(res.headers.get("content-length") || 0);
-  if (declared > limit) return { ok: false, error: `it is ${(declared / 1e6).toFixed(1)} MB, over the ${Math.round(limit / 1e6)} MB limit` };
+  if (declared > limit) return { ok: false, error: `it is ${(declared / 1048576).toFixed(1)} MB, over the ${Math.round(limit / 1048576)} MB limit` };
   if (!res.body) return { ok: true, bytes: Buffer.from(await res.arrayBuffer()) };
   const reader = res.body.getReader();
   const chunks = [];
@@ -1120,7 +1121,7 @@ async function readBytesCapped(res, limit) {
     size += value.length;
     if (size > limit) {
       await reader.cancel().catch(() => {});
-      return { ok: false, error: `it is over the ${Math.round(limit / 1e6)} MB limit` };
+      return { ok: false, error: `it is over the ${Math.round(limit / 1048576)} MB limit` };
     }
     chunks.push(value);
   }
@@ -1220,6 +1221,43 @@ function embedderFor(req) {
   if (!url) return null;
   if (!embedders.has(url)) embedders.set(url, createEmbedder(url, { apiKey: process.env.Q38_EMBED_API_KEY || "" }));
   return embedders.get(url);
+}
+
+/* the OCR server, cached per URL like the embedder */
+const ocrs = new Map();
+function ocrFor(req) {
+  const url = String(req.headers["x-q38-ocr-url"] || process.env.Q38_OCR_URL || "").trim();
+  if (!url) return null;
+  if (!ocrs.has(url)) {
+    ocrs.set(
+      url,
+      createOcr(url, {
+        apiKey: process.env.Q38_OCR_API_KEY || "",
+        model: process.env.Q38_OCR_MODEL || "",
+        prompt: process.env.Q38_OCR_PROMPT || undefined,
+        maxTokens: Number(process.env.Q38_OCR_MAX_TOKENS) || 4096,
+      }),
+    );
+  }
+  return ocrs.get(url);
+}
+
+/* the inbox is scanned in the background: an OCR read can take minutes, and
+   the list must answer while it runs */
+let inboxRun = null;
+let lastInbox = { added: [], failed: [] };
+async function scanInboxSoon(lib, req) {
+  if (!inboxRun) {
+    inboxRun = lib
+      .scanInbox({ embedder: embedderFor(req), ocr: ocrFor(req) })
+      .then((r) => (lastInbox = r))
+      .catch(() => lastInbox)
+      .finally(() => (inboxRun = null));
+  }
+  const quick = await Promise.race([inboxRun, new Promise((r) => setTimeout(() => r(null), 1500))]);
+  const out = quick ?? { added: [], failed: [], running: true };
+  if (quick) lastInbox = { added: [], failed: [] }; // reported once
+  return out;
 }
 
 async function readJsonBody(req) {
@@ -1490,8 +1528,23 @@ export function createApi() {
         const lib = getLibrary();
         const route = url.pathname.slice("/api/library/".length);
         if (route === "list" && req.method === "GET") {
-          const inbox = await lib.scanInbox({ embedder: embedderFor(req) });
-          sendJson(res, 200, { ...lib.list(), inbox, embedUrl: embedderFor(req)?.base || "" });
+          const inbox = await scanInboxSoon(lib, req);
+          sendJson(res, 200, {
+            ...lib.list(),
+            inbox,
+            embedUrl: embedderFor(req)?.base || "",
+            ocrUrl: ocrFor(req)?.base || "",
+          });
+          return;
+        }
+        if (route === "jobs" && req.method === "GET") {
+          sendJson(res, 200, { ok: true, jobs: lib.jobs() });
+          return;
+        }
+        if (route === "reocr" && req.method === "POST") {
+          const payload = await readJsonBody(req);
+          const out = await lib.reocr(String(payload?.id ?? ""), { ocr: ocrFor(req), embedder: embedderFor(req) });
+          sendJson(res, out.ok ? 200 : 422, out);
           return;
         }
         if (route === "add" && req.method === "POST") {
@@ -1501,7 +1554,11 @@ export function createApi() {
             sendJson(res, 400, { ok: false, error: "which document? give a url" });
             return;
           }
-          const out = await lib.addUrl(target, { embedder: embedderFor(req) });
+          const out = await lib.addUrl(target, {
+            embedder: embedderFor(req),
+            ocr: ocrFor(req),
+            forceOcr: payload?.ocr === true,
+          });
           sendJson(res, out.ok ? 200 : 422, out);
           return;
         }
@@ -1520,6 +1577,8 @@ export function createApi() {
             name,
             source: name,
             embedder: embedderFor(req),
+            ocr: ocrFor(req),
+            forceOcr: req.headers["x-q38-ocr"] === "1",
           });
           sendJson(res, out.ok ? 200 : 422, out);
           return;

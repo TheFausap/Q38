@@ -10,7 +10,7 @@ import { GROUPS, familyLabel, modeById, MODES, reasonTag } from "../lib/modes";
 import { formatClock, formatRate, type JobTick, type PaceStats } from "../lib/pacing";
 import type { ArchiveRef, Compaction, ModeFamily, Sampling, ServerStatus, Settings } from "../lib/types";
 import { SKILL_INLINE_LIMIT, type SkillIndex } from "../lib/skills";
-import type { LibraryDoc } from "../lib/library";
+import type { LibraryDoc, LibraryJob } from "../lib/library";
 
 export type InspectorTab = "construct" | "sample" | "context" | "library" | "server";
 
@@ -59,6 +59,9 @@ export function Inspector({
   onLibraryRemove,
   onLibraryEmbed,
   onLibraryReload,
+  libJobs,
+  ocrOn,
+  onLibraryReocr,
 }: {
   tab: InspectorTab;
   onTab: (t: InspectorTab) => void;
@@ -102,6 +105,9 @@ export function Inspector({
   onLibraryRemove: (id: string) => void;
   onLibraryEmbed: () => void;
   onLibraryReload: () => void;
+  libJobs: LibraryJob[];
+  ocrOn: boolean;
+  onLibraryReocr: (id: string) => void;
 }) {
   const [libUrl, setLibUrl] = useState("");
   const [q, setQ] = useState("");
@@ -633,7 +639,30 @@ export function Inspector({
             />
           </label>
           {libBusy && libBusy !== "add" && <p className="hint tiny">{libBusy}…</p>}
+          {libJobs.map((j) => (
+            <div key={j.key} className="lib-job">
+              <div className="lib-job-text">
+                OCR · {j.label.length > 46 ? `${j.label.slice(0, 45)}…` : j.label}
+                <span>{j.total ? `page ${j.done} of ${j.total}` : "rendering…"}</span>
+              </div>
+              <div className="lib-job-bar">
+                <span style={{ width: `${j.total ? Math.round((100 * j.done) / j.total) : 2}%` }} />
+              </div>
+            </div>
+          ))}
           {libNotice && <p className="hint tiny">{libNotice}</p>}
+
+          <div className="group-label">OCR</div>
+          {ocrOn ? (
+            <p className="hint tiny">
+              Scanned PDFs are read with OCR automatically. “re-read with OCR” on a paper replaces its text
+              layer with the OCR model’s reading — slower, but faithful equations and tables.
+            </p>
+          ) : (
+            <p className="hint tiny">
+              Off. Set an OCR server in Setup (PaddleOCR-VL on vLLM) to read scans and maths-heavy papers.
+            </p>
+          )}
 
           <div className="group-label">Search</div>
           {settings.embedUrl.trim() ? (
@@ -676,6 +705,7 @@ export function Inspector({
                 {d.pages ? `${d.pages} pages · ` : ""}
                 {d.chunks} chunks · {d.sections} sections · {d.kind}
                 {d.embedded ? " · embedded" : ""}
+                {d.extractor?.startsWith("ocr") ? " · OCR" : ""}
               </div>
               <code className="lib-doc-id">{d.id}</code>
               <div className="lib-doc-actions">
@@ -683,6 +713,17 @@ export function Inspector({
                   <a href={d.source} target="_blank" rel="noreferrer">
                     source
                   </a>
+                )}
+                {ocrOn && d.kind === "pdf" && !d.extractor?.startsWith("ocr") && (
+                  <button
+                    type="button"
+                    className="lib-action"
+                    onClick={() => onLibraryReocr(d.id)}
+                    disabled={libBusy !== null}
+                    title="Read this PDF again page by page with the OCR model — equations and tables come out faithfully"
+                  >
+                    re-read with OCR
+                  </button>
                 )}
                 <button
                   type="button"

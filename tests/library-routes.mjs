@@ -25,13 +25,14 @@ process.env.Q38_WEB_ALLOW_PRIVATE = "1"; // the stubs live on 127.0.0.1
 
 const lib = await import("../server/library.mjs");
 const { createApi, htmlToText, titleOf } = await import("../server/api.mjs");
-const { chunkBlocks, createEmbedder, createLibrary, documentUrl, embedPrefixes, extractHtml, extractPdf, extractText, headingKind, terms } = lib;
+const { blocksFromOcr, chunkBlocks, createEmbedder, createLibrary, documentUrl, embedPrefixes, extractHtml, extractPdf, extractText, headingKind, terms } = lib;
 
 /* ---------------------------------------------------------- stubs */
 const paper = samplePaper();
 const STUB = 18600 + Math.floor(Math.random() * 300);
 const EMBED = STUB + 1;
 const API = STUB + 2;
+const OCR = STUB + 3;
 const stub = http.createServer((req, res) => {
   if (req.url === "/paper.pdf") {
     res.writeHead(200, { "Content-Type": "application/pdf", "Content-Length": paper.length });
@@ -87,6 +88,37 @@ const embed = http.createServer((req, res) => {
 });
 await new Promise((r) => stub.listen(STUB, "127.0.0.1", r));
 await new Promise((r) => embed.listen(EMBED, "127.0.0.1", r));
+
+/* a PaddleOCR-VL stand-in: answers like vLLM's /v1/chat/completions, one page
+   of "OCR" per image. `ocrMode.slow` makes it take its time; `ocrMode.failSecond`
+   makes the second distinct page fail every time. */
+const ocrRequests = [];
+const ocrMode = { slow: 0, failSecond: false };
+const pageOf = new Map();
+const ocrServer = http.createServer((req, res) => {
+  if (req.url === "/v1/models") return res.end(JSON.stringify({ object: "list", data: [{ id: "PaddleOCR-VL-0.9B" }] }));
+  let body = "";
+  req.on("data", (c) => (body += c));
+  req.on("end", async () => {
+    const j = JSON.parse(body);
+    ocrRequests.push(j);
+    const url = j.messages[0].content[0].image_url.url;
+    if (!pageOf.has(url)) pageOf.set(url, pageOf.size + 1);
+    const n = pageOf.get(url);
+    if (ocrMode.slow) await new Promise((r) => setTimeout(r, ocrMode.slow));
+    if (ocrMode.failSecond && n === 2) {
+      res.writeHead(500);
+      return res.end("CUDA out of memory");
+    }
+    const text =
+      n === 1
+        ? `# Scanned Field Notes\n\nJournal of Tests\n\n## 1 Method\n\nWe set $\\eta = 0.1$ and update $\\theta_{t+1} = \\theta_t - \\eta g_t$. ${"Careful prose. ".repeat(20)}\n\n1`
+        : `Journal of Tests\n\n## ${n} Results on page ${n}\n\n<table><tr><th>model</th><th>ppl</th></tr><tr><td>Hope</td><td>12.3</td></tr></table>\n\n${"More observed prose. ".repeat(20)}\n\n${n}`;
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }] }));
+  });
+});
+await new Promise((r) => ocrServer.listen(OCR, "127.0.0.1", r));
 const api = createApi();
 const server = http.createServer((req, res) => api(req, res, () => res.end("{}")));
 await new Promise((r) => server.listen(API, "127.0.0.1", r));
@@ -289,6 +321,84 @@ try {
     check(/doc_add/.test(pdfRead.json.error), "a PDF given to web_fetch points the model at the library");
   }
 
+  /* ------------------------------------------------------------- OCR */
+  {
+    const pages = blocksFromOcr([
+      { page: 1, text: "# A Scanned Title\nRunning head\n\n## 1 Intro\nSome text that is long enough to be a paragraph of prose here.\n\n1" },
+      { page: 2, text: "Running head\n2 Method\n<table><tr><td>a</td><td>b</td></tr></table>\n2" },
+      { page: 3, text: "Running head\n### 3 Results\n$$x = y$$\n3" },
+      { page: 4, text: "Running head\nReferences\n[1] A paper.\n4" },
+    ]);
+    check(pages.title === "A Scanned Title", "OCR: the first # line on page 1 is the title");
+    const heads = pages.blocks.filter((b) => b.kind === "heading").map((b) => b.text);
+    check(JSON.stringify(heads) === JSON.stringify(["1 Intro", "2 Method", "3 Results", "References"]), `OCR: headings from # and numbering (${heads.join(" | ")})`);
+    const all = pages.blocks.map((b) => b.text).join("\n");
+    check(!/Running head/.test(all), "OCR: running heads are dropped");
+    check(/a \| b \|/.test(all) && !/<td>/.test(all), "OCR: an HTML table becomes rows");
+    check(/\$\$x = y\$\$/.test(all), "OCR: LaTeX survives untouched");
+    check(!pages.blocks.some((b) => /^\d$/.test(b.text)), "OCR: page numbers are dropped");
+
+    const withOcr = { "X-Q38-Ocr-Url": `http://127.0.0.1:${OCR}/v1` };
+    const noOcr = await post("/api/library/add", { url: `http://127.0.0.1:${STUB}/scan.pdf` });
+    check(noOcr.status === 422 && /set an OCR server/.test(noOcr.json.error), "a scan without OCR says how to read it");
+
+    ocrRequests.length = 0;
+    const scan = await post("/api/library/add", { url: `http://127.0.0.1:${STUB}/scan.pdf` }, withOcr);
+    check(scan.status === 200 && scan.json.doc.extractor === "ocr:PaddleOCR-VL-0.9B", `a scan is read with OCR automatically (${scan.json.error || scan.json.doc?.extractor})`);
+    check(/no usable text layer/.test(scan.json.note), "and the note says why");
+    check(scan.json.doc.title === "Scanned Field Notes", `its title comes from the OCR (${scan.json.doc.title})`);
+    const req0 = ocrRequests[0];
+    check(req0.model === "PaddleOCR-VL-0.9B" && req0.temperature === 0, "OCR asks the served model, at temperature 0");
+    const parts = req0.messages[0].content;
+    check(parts[0].type === "image_url" && parts[1].type === "text" && parts[1].text === "OCR:", "image first, then the task prompt");
+    const png = Buffer.from(parts[0].image_url.url.split(",")[1], "base64");
+    const w = png.readUInt32BE(16);
+    const h = png.readUInt32BE(20);
+    check(png.subarray(1, 4).toString() === "PNG" && w * h <= 1_003_520 && w * h > 800_000, `a PNG near the model's pixel ceiling (${w}×${h})`);
+
+    const scanRead = await call(`/api/library/read?doc=${scan.json.doc.id}&section=1`);
+    check(/\\theta_\{t\+1\}/.test(scanRead.json.text), "OCR'd equations are kept as LaTeX");
+
+    /* a normal PDF, OCR'd on request, with progress while it runs */
+    ocrRequests.length = 0;
+    pageOf.clear();
+    ocrMode.slow = 250;
+    const pending = post("/api/library/add", { url: `http://127.0.0.1:${STUB}/paper.pdf`, ocr: true }, withOcr);
+    let progress = null;
+    for (let i = 0; i < 40 && !progress; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      const j = (await call("/api/library/jobs")).json.jobs;
+      if (j.length && j[0].total) progress = j[0];
+    }
+    check(progress && progress.total === 4 && /paper\.pdf/.test(progress.label), `GET /api/library/jobs shows the read in progress (${JSON.stringify(progress)})`);
+    const forced = await pending;
+    ocrMode.slow = 0;
+    check(forced.status === 200 && forced.json.doc.extractor.startsWith("ocr:"), "doc_add with ocr=true reads a text PDF with OCR");
+    check(forced.json.doc.title === "Nested Memories for Continual Learners", "keeping the PDF's own title");
+    check(ocrRequests.length === 4, `one request per page (${ocrRequests.length})`);
+    check((await call("/api/library/jobs")).json.jobs.length === 0, "and the job is gone when it is done");
+
+    /* re-reading a stored text-layer PDF, with one page that will not read */
+    await post("/api/library/remove", { id: forced.json.doc.id });
+    const plain = await post("/api/library/add", { url: `http://127.0.0.1:${STUB}/paper.pdf` });
+    check(plain.json.doc.extractor === "text", "added normally, it uses the text layer");
+    const embedded = await call("/api/library/embed", { method: "POST", headers: { "X-Q38-Embed-Url": `http://127.0.0.1:${EMBED}` } });
+    check(embedded.json.ok, "and can be embedded");
+    pageOf.clear();
+    ocrMode.failSecond = true;
+    const re = await post("/api/library/reocr", { id: plain.json.doc.id }, withOcr);
+    ocrMode.failSecond = false;
+    check(re.status === 200 && re.json.doc.id === plain.json.doc.id, "POST /api/library/reocr re-reads in place, same id");
+    check(re.json.doc.extractor.startsWith("ocr:") && re.json.doc.embedded === null, "replacing the text and dropping stale vectors");
+    check(/could not read pages? 2/.test(re.json.note), `a page that fails twice is named, the rest kept (${re.json.note})`);
+
+    const down = await post("/api/library/reocr", { id: plain.json.doc.id }, { "X-Q38-Ocr-Url": "http://127.0.0.1:1" });
+    check(down.status === 422 && /not answering/.test(down.json.error), "a dead OCR server is named");
+    check((await call(`/api/library/read?doc=${plain.json.doc.id}`)).json.ok, "and the document is left as it was");
+    const off = await post("/api/library/reocr", { id: plain.json.doc.id });
+    check(off.status === 422 && /no OCR server/.test(off.json.error), "re-reading with no OCR server set is refused");
+  }
+
   console.log(results.join("\n"));
   console.log(`library checks passed (${results.length})`);
 } catch (err) {
@@ -299,6 +409,7 @@ try {
   server.close();
   stub.close();
   embed.close();
+  ocrServer.close();
   fs.rmSync(tmp, { recursive: true, force: true });
   process.exit(process.exitCode || 0);
 }

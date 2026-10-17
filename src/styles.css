@@ -1322,3 +1322,11 @@ button { cursor: pointer; }
 .lib-remove:disabled { opacity: 0.4; cursor: not-allowed; }
 /* five tabs in a 320px rail: tighter tracking and padding so none is cut off */
 .rail.right .tab { letter-spacing: 0.06em; padding: 12px 4px; font-size: 10.5px; }
+.lib-action { background: none; border: 0; padding: 0; color: var(--brass); font-size: 12px; cursor: pointer; }
+.lib-action:hover { text-decoration: underline; }
+.lib-action:disabled { opacity: 0.4; cursor: not-allowed; }
+.lib-job { margin: 0 0 12px; }
+.lib-job-text { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.lib-job-text span { color: var(--brass-2); font-family: var(--mono); white-space: nowrap; }
+.lib-job-bar { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; }
+.lib-job-bar span { display: block; height: 100%; background: var(--brass); transition: width 0.4s ease; }
