@@ -90,6 +90,9 @@ const stub = http.createServer((req, res) => {
     const asksForSkill = /SKILLPLEASE/.test(newestText);
     /* DOCPLEASE: add a paper, then search it, then answer — one turn, three rounds */
     const asksForDoc = /DOCPLEASE/.test(newestText);
+    /* TEXTCALLPLEASE: the call arrives as plain content in Qwen's XML form, the
+       way a fine-tune does when llama-server's parser misses it */
+    const writesCallAsText = /TEXTCALLPLEASE/.test(newestText);
     /* GREEDYSKILL never stops asking: the workbench has to end the turn itself */
     const greedy = /GREEDYSKILL/.test(newestText);
     const wireText = JSON.stringify(body.messages || []);
@@ -153,6 +156,18 @@ const stub = http.createServer((req, res) => {
     }
     if (asksForDoc && offered("doc_search") && !wireText.includes("### Library passages")) {
       emit("doc_search", JSON.stringify({ query: "how often does each block of the continuum memory update" }));
+      return;
+    }
+    if (writesCallAsText && offered("doc_search") && !wireText.includes("### Library passages")) {
+      const text =
+        "Let me search the library.\n\n<tool_call>\n<function=doc_search>\n<parameter=doc_id>\nnested memories\n</parameter>\n" +
+        "<parameter=query>\ncontinuum memory update frequency\n</parameter>\n<parameter=limit>\n8\n</parameter>\n</function>\n</tool_call>";
+      for (const piece of text.match(/[\s\S]{1,30}/g) || []) {
+        chunk({ choices: [{ index: 0, delta: { content: piece }, finish_reason: null }] });
+      }
+      chunk({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
+      res.write("data: [DONE]\n\n");
+      res.end();
       return;
     }
     if (greedy && offered("skill_load")) {
@@ -642,6 +657,24 @@ try {
   check(!!docReply, "the reply records the paper by title");
   check((docReply.sources ?? []).some((s) => /paper\.pdf$/.test(s.url)), "and lists it as a source");
   check(fs.readdirSync(`${LIBRARY}/docs`).length === 1, "the paper is on disk for later chats");
+
+  /* --- 11e. a tool call written as text is still run ------------------ */
+  const beforeText = calls.length;
+  await ask("which update frequencies does the paper use? TEXTCALLPLEASE");
+  const textCalls = calls.slice(beforeText).filter((c) => JSON.stringify(c.messages).includes("TEXTCALLPLEASE"));
+  check(textCalls.length === 2, `a text call is run and the turn sent again (${textCalls.length})`);
+  const afterText = textCalls[1].messages[0].content;
+  check(/### Library passages for "continuum memory update frequency"/.test(afterText), "the call ran with the query the model wrote");
+  check(/2 Continuum Memory System/.test(afterText), "doc_id was read as doc: the search stayed in that paper");
+  await waitFor("the text-call reply is saved", () => {
+    const msgs = stored().messages;
+    return /Noted\./.test(msgs[msgs.length - 1]?.content || "");
+  }, 5000);
+  const textReply = stored().messages[stored().messages.length - 1];
+  check(!/<tool_call>|<function=|<parameter=/.test(textReply.content), "the markup is gone from the reply");
+  check(/Let me search the library\./.test(textReply.content), "the prose around it stays");
+  check(!/<tool_call>/.test(allText()), "and none is on the page");
+  check(/wrote its tool call as text/.test(text(".banner.web")), `the banner says what happened: ${text(".banner.web").slice(0, 90)}`);
 
   /* the Library tab shows it */
   const libTab = byText(/^library$/);

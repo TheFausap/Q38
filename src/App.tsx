@@ -48,6 +48,7 @@ import {
 } from "./lib/context";
 import { modeById, reasonTag } from "./lib/modes";
 import { toolBriefing, toolNames } from "./lib/toolbrief";
+import { normaliseArgs, parseTextToolCalls } from "./lib/textcalls";
 import {
   DOC_MAX_ADDS_PER_TURN,
   DOC_MAX_READS_PER_TURN,
@@ -1643,6 +1644,34 @@ export function App() {
     }
 
     const s = settle();
+    /* Tool calls the model wrote as text (llama-server's parser did not
+       recognise the format): run them like real ones, and keep the markup
+       out of the reply. Structured calls get their argument names mapped
+       onto the declared ones too — models guess `doc_id` for `doc`. */
+    if (args.tools?.length) {
+      if (finish.calls?.length) {
+        finish = {
+          ...finish,
+          calls: finish.calls.map((c) => {
+            const schema = (args.tools as { function?: { name?: string; parameters?: object } }[]).find(
+              (t) => t.function?.name === c.name,
+            )?.function?.parameters as Parameters<typeof normaliseArgs>[1];
+            return { ...c, arguments: JSON.stringify(normaliseArgs(argsOf(c.arguments), schema ?? null)) };
+          }),
+        };
+      } else {
+        const found = parseTextToolCalls(s.body, args.tools);
+        if (found.calls.length) {
+          finish = { ...finish, calls: found.calls, reason: "tool_calls" };
+          s.body = found.cleaned;
+          setWebNotice(
+            `The model wrote ${found.calls.length === 1 ? "its tool call" : `${found.calls.length} tool calls`} as text (${found.calls
+              .map((c) => c.name)
+              .join(", ")}) — read and run anyway. Updating llama.cpp usually makes it parse them itself.`,
+          );
+        }
+      }
+    }
     acc.body = s.body;
     acc.reasoning = s.reasoning;
     patchMessage(args.sessionId, args.messageId, (m) => ({

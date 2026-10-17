@@ -7,6 +7,7 @@ import { fenceState } from "../lib/summarize";
 import { ArchiveCard } from "./Memory";
 import type { ArchiveRef, Attachment, ChatMessage, Compaction, ModeFamily, Session } from "../lib/types";
 import { MarkdownView } from "./MarkdownView";
+import { stripToolMarkup } from "../lib/textcalls";
 import { activeWebText } from "../lib/web";
 
 export function Chat({
@@ -439,7 +440,8 @@ function MessageView({
       </article>
     );
   }
-  const peeled = peelThink(message.content, message.reasoning);
+  /* a tool call the model writes as text is run, not read: keep its markup off the page */
+  const peeled = peelThink(stripToolMarkup(message.content), message.reasoning);
   const fence = fenceState(peeled.content);
   /* Only offer a resume where the reply demonstrably stopped short: the server
      said max_tokens, or the text ends inside an open code block. A reply that
