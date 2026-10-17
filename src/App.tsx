@@ -13,6 +13,13 @@ import {
   memoryGet,
   memoryList,
   memoryPut,
+  libraryAdd,
+  libraryEmbed,
+  libraryList,
+  libraryRead,
+  librarySearch,
+  libraryRemove,
+  libraryUpload,
   skillIndex,
   skillRead,
   skillSearch,
@@ -38,6 +45,20 @@ import {
   type ContextUsage,
 } from "./lib/context";
 import { modeById, reasonTag } from "./lib/modes";
+import {
+  DOC_MAX_ADDS_PER_TURN,
+  DOC_MAX_READS_PER_TURN,
+  DOC_MAX_SEARCHES_PER_TURN,
+  addTapeLine,
+  addText,
+  libraryActiveText,
+  libraryTools,
+  readTapeLine,
+  readText,
+  searchTapeLine as librarySearchTapeLine,
+  searchText as librarySearchText,
+  type LibraryDoc,
+} from "./lib/library";
 import {
   SKILL_MAX_LOADS_PER_TURN,
   SKILL_MAX_SEARCHES_PER_TURN,
@@ -252,7 +273,38 @@ export function App() {
   const [webLine, setWebLine] = useState<string | null>(null);
   const [webNotice, setWebNotice] = useState<string | null>(null);
   /** what the model is waiting on right now, if it is waiting on the network */
-  const [webActive, setWebActive] = useState<{ kind: "search" | "open" | "skill"; label: string } | null>(null);
+  const [webActive, setWebActive] = useState<{ kind: "search" | "open" | "skill" | "library"; label: string } | null>(null);
+  /** the library's documents as the server last listed them */
+  const [libDocs, setLibDocs] = useState<LibraryDoc[] | null>(null);
+  const [libNotice, setLibNotice] = useState<string | null>(null);
+  const [libBusy, setLibBusy] = useState<string | null>(null);
+  const [libRoot, setLibRoot] = useState("");
+  const reloadLibrary = useCallback(async () => {
+    const out = await libraryList(settings);
+    if (out.ok) {
+      setLibDocs(out.docs);
+      setLibRoot(out.root || "");
+      const inbox = out.inbox;
+      if (inbox?.added.length || inbox?.failed.length) {
+        setLibNotice(
+          [
+            inbox.added.length ? `Read ${inbox.added.length} file${inbox.added.length === 1 ? "" : "s"} from the inbox: ${inbox.added.join(", ")}.` : "",
+            inbox.failed.length ? `Could not read ${inbox.failed.map((f) => `${f.name} (${f.error})`).join("; ")} — moved to inbox/failed.` : "",
+          ]
+            .filter(Boolean)
+            .join(" "),
+        );
+      }
+    } else {
+      setLibNotice(`The library is out of reach: ${out.error}`);
+    }
+    return out;
+  }, [settings]);
+  useEffect(() => {
+    if (settings.library) void reloadLibrary();
+    // the embedding URL changes which documents count as embedded
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.library, settings.embedUrl]);
   /** the skills folder as the server last saw it (null until first asked) */
   const [skills, setSkills] = useState<SkillIndex | null>(null);
   const reloadSkills = useCallback(async () => {
@@ -441,7 +493,9 @@ export function App() {
           ? searchingLine(webActive.label)
           : webActive.kind === "skill"
             ? `SKILL: READING ${webActive.label.toUpperCase()}…`
-            : openingLine(webActive.label)
+            : webActive.kind === "library"
+              ? `LIBRARY: ${webActive.label.toUpperCase().slice(0, 60)}…`
+              : openingLine(webActive.label)
         : null,
     };
     // `tick` is the clock that moves this view forward between tokens
@@ -1310,6 +1364,125 @@ export function App() {
     [settings.skillChars],
   );
 
+  /**
+   * The model used the library: adding a document, searching, or reading a
+   * section. Every answer comes back written for the prompt — misses too.
+   */
+  const libraryForTool = useCallback(
+    async (
+      addCalls: { arguments: string }[],
+      searchCalls: { arguments: string }[],
+      readCalls: { arguments: string }[],
+    ) => {
+      const texts: string[] = [];
+      const sources: { title: string; url: string }[] = [];
+      const used: string[] = [];
+      const cite = (title?: string, source?: string) => {
+        if (title) used.push(title);
+        if (source && /^https?:\/\//.test(source)) sources.push(sourceOf(source, title));
+      };
+      let changed = false;
+      for (const call of addCalls) {
+        const url = String(argsOf(call.arguments).url ?? "").trim();
+        if (!url) {
+          texts.push("### Nothing to add\nThat doc_add call had no `url`.");
+          continue;
+        }
+        setWebActive({ kind: "library", label: libraryActiveText("add", hostOf(url)) });
+        const out = await libraryAdd(url, settings);
+        texts.push(addText(url, out));
+        setWebLine(addTapeLine(out));
+        setLibNotice(
+          out.ok && out.doc
+            ? `${out.existing ? "Already had" : "Added"} “${out.doc.title}” — ${out.doc.pages ? `${out.doc.pages} pages, ` : ""}${out.doc.chunks} chunks${out.note ? ` (${out.note})` : ""}.`
+            : `Could not add ${url}: ${out.error}`,
+        );
+        if (out.ok && out.doc) {
+          cite(out.doc.title, out.doc.source);
+          changed = changed || !out.existing;
+        }
+        setWebActive(null);
+      }
+      if (changed) void reloadLibrary();
+      for (const call of searchCalls) {
+        const args = argsOf(call.arguments);
+        const query = String(args.query ?? "").trim();
+        if (!query) {
+          texts.push("### Library search skipped\nThe call had no `query`.");
+          continue;
+        }
+        setWebActive({ kind: "library", label: libraryActiveText("search", query.slice(0, 50)) });
+        const out = await librarySearch(query, String(args.doc ?? "").trim(), settings);
+        texts.push(librarySearchText(query, out));
+        setWebLine(librarySearchTapeLine(query, out));
+        for (const h of out.results ?? []) cite(h.title, h.source);
+        setWebActive(null);
+      }
+      for (const call of readCalls) {
+        const args = argsOf(call.arguments);
+        const doc = String(args.doc ?? "").trim();
+        const section = args.section != null ? String(args.section).trim() : "";
+        const chunk = args.chunk != null && args.chunk !== "" ? Number(args.chunk) : null;
+        if (!doc) {
+          texts.push("### Which document?\nThat doc_read call had no `doc`.");
+          continue;
+        }
+        setWebActive({ kind: "library", label: libraryActiveText("read", section ? `§ ${section}` : doc.slice(0, 40)) });
+        const out = await libraryRead(doc, { section, chunk, chars: settings.docReadChars }, settings);
+        texts.push(readText(section ? `${doc} § ${section}` : doc, out));
+        setWebLine(readTapeLine(out));
+        if (out.ok) cite(out.title, out.source);
+        setWebActive(null);
+      }
+      return { texts, sources, used: [...new Set(used)] };
+    },
+    [settings, reloadLibrary],
+  );
+
+  /* the library, by hand (the Library tab) */
+  const addToLibrary = async (url: string) => {
+    setLibBusy("add");
+    const out = await libraryAdd(url, settings);
+    setLibNotice(
+      out.ok && out.doc
+        ? `${out.existing ? "Already had" : "Added"} “${out.doc.title}” — ${out.doc.pages ? `${out.doc.pages} pages, ` : ""}${out.doc.chunks} chunks, ${out.doc.sections} sections${out.note ? ` (${out.note})` : ""}.`
+        : `Could not add it: ${out.error}`,
+    );
+    setLibBusy(null);
+    void reloadLibrary();
+  };
+  const uploadToLibrary = async (files: File[]) => {
+    const lines: string[] = [];
+    for (const f of files) {
+      setLibBusy(`reading ${f.name}`);
+      const out = await libraryUpload(f, settings);
+      lines.push(
+        out.ok && out.doc
+          ? `${out.existing ? "already had" : "added"} “${out.doc.title}” (${out.doc.chunks} chunks)`
+          : `${f.name}: ${out.error}`,
+      );
+    }
+    setLibNotice(lines.join("; ") + ".");
+    setLibBusy(null);
+    void reloadLibrary();
+  };
+  const removeFromLibrary = async (id: string) => {
+    setLibBusy("removing");
+    const out = await libraryRemove(id, settings);
+    setLibNotice(out.ok ? "Removed." : `Could not remove it: ${out.error}`);
+    setLibBusy(null);
+    void reloadLibrary();
+  };
+  const embedLibrary = async () => {
+    setLibBusy("embedding");
+    const out = await libraryEmbed(settings);
+    setLibNotice(
+      out.ok ? `Embedded ${out.embedded} document${out.embedded === 1 ? "" : "s"} with ${out.model}.` : `Embedding failed: ${out.error}`,
+    );
+    setLibBusy(null);
+    void reloadLibrary();
+  };
+
   /* ---------------------------------------------------------- streaming */
 
   const runRound = async (args: {
@@ -1499,6 +1672,9 @@ export function App() {
     let fetches = 0;
     let skillSearches = 0;
     let skillLoads = 0;
+    let docAdds = 0;
+    let docSearches = 0;
+    let docReads = 0;
     const sources: { title: string; url: string }[] = [];
     /* Every tool result of this turn, in order. Each hop's round must see all
        of them, not only the latest hop's, or the model loses what it read. */
@@ -1515,12 +1691,19 @@ export function App() {
         skillSearches < SKILL_MAX_SEARCHES_PER_TURN ? called.filter((c) => c.name === "skill_search") : [];
       const skillLoadCalls =
         skillLoads < SKILL_MAX_LOADS_PER_TURN ? called.filter((c) => c.name === "skill_load") : [];
+      const docAddCalls = docAdds < DOC_MAX_ADDS_PER_TURN ? called.filter((c) => c.name === "doc_add") : [];
+      const docSearchCalls =
+        docSearches < DOC_MAX_SEARCHES_PER_TURN ? called.filter((c) => c.name === "doc_search") : [];
+      const docReadCalls = docReads < DOC_MAX_READS_PER_TURN ? called.filter((c) => c.name === "doc_read") : [];
       if (
         !recallCalls.length &&
         !searchCalls.length &&
         !fetchCalls.length &&
         !skillSearchCalls.length &&
-        !skillLoadCalls.length
+        !skillLoadCalls.length &&
+        !docAddCalls.length &&
+        !docSearchCalls.length &&
+        !docReadCalls.length
       )
         break;
 
@@ -1557,6 +1740,16 @@ export function App() {
         skillSearches += skillSearchCalls.length;
         skillLoads += skillLoadCalls.length;
       }
+      let hopDocs: string[] = [];
+      if ((docAddCalls.length || docSearchCalls.length || docReadCalls.length) && !args.ctrl.signal.aborted) {
+        const got = await libraryForTool(docAddCalls, docSearchCalls, docReadCalls);
+        texts.push(...got.texts);
+        hopSources = [...hopSources, ...got.sources];
+        hopDocs = got.used;
+        docAdds += docAddCalls.length;
+        docSearches += docSearchCalls.length;
+        docReads += docReadCalls.length;
+      }
       if (!texts.length) break;
 
       sources.push(...hopSources);
@@ -1585,6 +1778,7 @@ export function App() {
         skillsRead: hopSkills.length
           ? [...new Set([...(m.skillsRead ?? []), ...hopSkills])]
           : m.skillsRead,
+        docsUsed: hopDocs.length ? [...new Set([...(m.docsUsed ?? []), ...hopDocs])] : m.docsUsed,
       }));
     }
     /* The loop ends on a budget, not on the model being done: if the last
@@ -1607,7 +1801,7 @@ export function App() {
         extraSystem: [
           ...(args.extraSystem ?? []),
           ...gathered,
-          "The search, reading and skill budget for this turn is used up and no tools are available now. " +
+          "The search, reading, skill and library budget for this turn is used up and no tools are available now. " +
             "Answer the user's request in full from the results above; say plainly if something " +
             "could not be confirmed.",
         ],
@@ -1837,6 +2031,7 @@ export function App() {
       if (onDisk && settings.recallTool) offered.push(RECALL_TOOL);
       if (settings.webSearch) offered.push(...WEB_TOOLS);
       if (settings.skills) offered.push(...skillTools(skills));
+      if (settings.library) offered.push(...libraryTools(libDocs ?? []));
       tools = offered.length ? offered : undefined;
     } catch (err) {
       setFoldNotice(`Could not prepare the context: ${err instanceof Error ? err.message : String(err)}`);
@@ -2261,6 +2456,15 @@ export function App() {
             onUnarchive={() => void unarchive()}
             skills={skills}
             onReloadSkills={() => void reloadSkills()}
+            libDocs={libDocs}
+            libRoot={libRoot}
+            libNotice={libNotice}
+            libBusy={libBusy}
+            onLibraryAdd={(url) => void addToLibrary(url)}
+            onLibraryUpload={(files) => void uploadToLibrary(files)}
+            onLibraryRemove={(id) => void removeFromLibrary(id)}
+            onLibraryEmbed={() => void embedLibrary()}
+            onLibraryReload={() => void reloadLibrary()}
           />
         )}
       </div>
@@ -2421,6 +2625,31 @@ function SettingsModal({
                 onChange({
                   ...settings,
                   webPageChars: Math.max(1000, Math.min(WEB_MAX_CHARS, Number(e.target.value) || 6000)),
+                })
+              }
+            />
+          </label>
+          <label className="field">
+            <span>embeddings server (blank = keyword search)</span>
+            <input
+              type="url"
+              placeholder="http://127.0.0.1:8081"
+              value={settings.embedUrl}
+              onChange={(e) => onChange({ ...settings, embedUrl: e.target.value })}
+            />
+          </label>
+          <label className="field">
+            <span>characters per document read</span>
+            <input
+              type="number"
+              min={2000}
+              max={40000}
+              step={1000}
+              value={settings.docReadChars}
+              onChange={(e) =>
+                onChange({
+                  ...settings,
+                  docReadChars: Math.max(2000, Math.min(40000, Number(e.target.value) || 12000)),
                 })
               }
             />

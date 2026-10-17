@@ -11,8 +11,8 @@
     "start": "node server/prod.mjs",
     "serve": "node server/prod.mjs",
     "test": "npm run test:unit && npm run test:server && npm run test:ui",
-    "test:unit": "node --no-warnings --experimental-strip-types tests/memory.test.ts && node --no-warnings --experimental-strip-types tests/web.test.ts && node --no-warnings --experimental-strip-types tests/skills.test.ts",
-    "test:server": "node tests/web-routes.mjs && node tests/skills-routes.mjs",
+    "test:unit": "node --no-warnings --experimental-strip-types tests/memory.test.ts && node --no-warnings --experimental-strip-types tests/web.test.ts && node --no-warnings --experimental-strip-types tests/skills.test.ts && node --no-warnings --experimental-strip-types tests/library.test.ts",
+    "test:server": "node tests/web-routes.mjs && node tests/skills-routes.mjs && node tests/library-routes.mjs",
     "test:ui": "vite build --config tests/vite.ui-test.config.ts --ssr tests/ui-test-entry.tsx --logLevel warn && node tests/ui.mjs",
     "skills:sync": "node scripts/sync-skills.mjs"
   },
@@ -22,6 +22,7 @@
     "@fontsource/syne": "^5.3.0",
     "highlight.js": "^11.12.0",
     "katex": "^0.19.0",
+    "pdfjs-dist": "5.4.394",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },

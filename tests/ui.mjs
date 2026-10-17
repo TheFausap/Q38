@@ -16,6 +16,7 @@ import http from "node:http";
 import { fileURLToPath } from "node:url";
 import { JSDOM, VirtualConsole } from "jsdom";
 import { createApi } from "../server/api.mjs";
+import { samplePaper } from "./pdf-fixture.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const BUNDLE = fileURLToPath(new URL(".bundle/ui-test-entry.js", import.meta.url));
@@ -45,6 +46,10 @@ fs.writeFileSync(
 );
 fs.writeFileSync(`${SKILLS}/qutip/references/time_evolution.md`, "# Time evolution\n");
 process.env.Q38_SKILLS_DIR = SKILLS;
+/* and a library of our own, empty at the start */
+const LIBRARY = fileURLToPath(new URL(".tmp/library", import.meta.url));
+fs.rmSync(LIBRARY, { recursive: true, force: true });
+process.env.Q38_LIBRARY_DIR = LIBRARY;
 
 const MIDDLEWARE_PORT = 8174;
 const STUB_PORT = 8175;
@@ -83,6 +88,8 @@ const stub = http.createServer((req, res) => {
     const asksToSearch = /SEARCHPLEASE/.test(newestText);
     const asksToOpen = /OPENPLEASE/.test(newestText);
     const asksForSkill = /SKILLPLEASE/.test(newestText);
+    /* DOCPLEASE: add a paper, then search it, then answer — one turn, three rounds */
+    const asksForDoc = /DOCPLEASE/.test(newestText);
     /* GREEDYSKILL never stops asking: the workbench has to end the turn itself */
     const greedy = /GREEDYSKILL/.test(newestText);
     const wireText = JSON.stringify(body.messages || []);
@@ -138,6 +145,14 @@ const stub = http.createServer((req, res) => {
     if (asksForSkill && !answered.has(sig("skill_load")) && !wireText.includes("### Skill:") && offered("skill_load")) {
       answered.add(sig("skill_load"));
       emit("skill_load", '{"name":"qutip"}');
+      return;
+    }
+    if (asksForDoc && offered("doc_add") && !wireText.includes("### Added to the library")) {
+      emit("doc_add", JSON.stringify({ url: `http://127.0.0.1:${SEARCH_PORT}/paper.pdf` }));
+      return;
+    }
+    if (asksForDoc && offered("doc_search") && !wireText.includes("### Library passages")) {
+      emit("doc_search", JSON.stringify({ query: "how often does each block of the continuum memory update" }));
       return;
     }
     if (greedy && offered("skill_load")) {
@@ -198,6 +213,12 @@ const search = http.createServer((req, res) => {
         ],
       }),
     );
+    return;
+  }
+  if (url.pathname === "/paper.pdf") {
+    const pdf = samplePaper();
+    res.writeHead(200, { "Content-Type": "application/pdf", "Content-Length": pdf.length });
+    res.end(pdf);
     return;
   }
   if (url.pathname === "/page") {
@@ -590,6 +611,41 @@ try {
   await waitFor("the skill is saved on the reply", () =>
     stored().messages.some((m) => (m.skillsRead ?? []).includes("qutip")), 5000);
   check(stored().messages.some((m) => (m.skillsRead ?? []).includes("qutip")), "the reply records which skill");
+
+  /* --- 11d. the model reads a paper into the library and cites it ----- */
+  const beforeDoc = calls.length;
+  await ask("what does the nested memories paper say about update frequency? DOCPLEASE");
+  const docCalls = calls.slice(beforeDoc).filter((c) => JSON.stringify(c.messages).includes("DOCPLEASE"));
+  check(docCalls.length === 3, `add, search, answer: three rounds (${docCalls.length})`);
+  const docTools = (docCalls[0].tools || []).map((t) => t.function?.name);
+  check(["doc_add", "doc_search", "doc_read"].every((n) => docTools.includes(n)), "the library tools are offered, even while it is empty");
+  const afterAdd = docCalls[1].messages;
+  check(
+    afterAdd[0].role === "system" && afterAdd.filter((m) => m.role === "system").length === 1,
+    "library results ride in the one system message",
+  );
+  check(/### Added to the library: Nested Memories for Continual Learners/.test(afterAdd[0].content), "the paper was downloaded and read");
+  check(/2 Continuum Memory System — p\. 2/.test(afterAdd[0].content), "with its outline");
+  const afterSearch = docCalls[2].messages[0].content;
+  check(/### Library passages for/.test(afterSearch), "the search came back");
+  check(/§ 2 Continuum Memory System, p\. 2/.test(afterSearch), "pointing at the right section and page");
+  check(/each with its own update frequency/.test(afterSearch), "verbatim");
+  check(/### Added to the library/.test(afterSearch), "and the add is still in view on the last round");
+  check(/used a library document/.test(allText()), "the transcript marks it");
+  await waitFor("the reply records the paper", () =>
+    stored().messages.some((m) => (m.docsUsed ?? []).includes("Nested Memories for Continual Learners")), 5000);
+  const docReply = stored().messages.find((m) => (m.docsUsed ?? []).length);
+  check(!!docReply, "the reply records the paper by title");
+  check((docReply.sources ?? []).some((s) => /paper\.pdf$/.test(s.url)), "and lists it as a source");
+  check(fs.readdirSync(`${LIBRARY}/docs`).length === 1, "the paper is on disk for later chats");
+
+  /* the Library tab shows it */
+  const libTab = byText(/^library$/);
+  check(!!libTab, "there is a library tab");
+  click(libTab);
+  await waitFor("the library tab lists the paper", () => /Nested Memories for Continual Learners/.test(
+    window.document.querySelector(".rail.right")?.textContent || ""), 8000);
+  check(/4 pages · \d+ chunks · 6 sections · pdf/.test(window.document.querySelector(".rail.right").textContent), "with its size");
 
   /* --- 11c. a model that never stops asking still answers ------------- */
   const beforeGreedy = calls.length;

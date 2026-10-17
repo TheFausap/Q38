@@ -57,7 +57,7 @@ export function Chat({
   onFold: () => void;
   onUnfold: (index: number) => void;
   folding: boolean;
-  webActive: { kind: "search" | "open" | "skill"; label: string } | null;
+  webActive: { kind: "search" | "open" | "skill" | "library"; label: string } | null;
   archives: ArchiveRef[];
   held: string[];
   memRoot: string;
@@ -184,7 +184,7 @@ export function Chat({
                   disabled={!!streamingId}
                 />
               )}
-              {!hidden && (m.recalled || m.searched || m.opened || m.skillsRead?.length) ? (
+              {!hidden && (m.recalled || m.searched || m.opened || m.skillsRead?.length || m.docsUsed?.length) ? (
                 <div className="mem-hop">
                   {[
                     m.recalled
@@ -194,6 +194,9 @@ export function Chat({
                     m.opened ? `⇄ opened ${m.opened} page${m.opened === 1 ? "" : "s"}` : "",
                     m.skillsRead?.length
                       ? `⇄ consulted ${m.skillsRead.length === 1 ? "a skill" : `${m.skillsRead.length} skills`}`
+                      : "",
+                    m.docsUsed?.length
+                      ? `⇄ used ${m.docsUsed.length === 1 ? "a library document" : `${m.docsUsed.length} library documents`}`
                       : "",
                   ]
                     .filter(Boolean)
@@ -456,6 +459,11 @@ function MessageView({
         {!!message.continues && <span className="badge">continued ×{message.continues}</span>}
         {!!message.searched && <span className="badge web">searched ×{message.searched}</span>}
         {!!message.opened && <span className="badge web">read {message.opened} page{message.opened === 1 ? "" : "s"}</span>}
+        {message.docsUsed?.map((d) => (
+          <span key={`doc-${d}`} className="badge web" title={d}>
+            doc · {d.length > 40 ? `${d.slice(0, 39)}…` : d}
+          </span>
+        ))}
         {message.skillsRead?.map((s) => (
           <span key={s} className="badge web" title="skill read for this reply">
             skill · {s}

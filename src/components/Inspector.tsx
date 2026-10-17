@@ -10,10 +10,11 @@ import { GROUPS, familyLabel, modeById, MODES, reasonTag } from "../lib/modes";
 import { formatClock, formatRate, type JobTick, type PaceStats } from "../lib/pacing";
 import type { ArchiveRef, Compaction, ModeFamily, Sampling, ServerStatus, Settings } from "../lib/types";
 import { SKILL_INLINE_LIMIT, type SkillIndex } from "../lib/skills";
+import type { LibraryDoc } from "../lib/library";
 
-export type InspectorTab = "construct" | "sample" | "context" | "server";
+export type InspectorTab = "construct" | "sample" | "context" | "library" | "server";
 
-const TABS: InspectorTab[] = ["construct", "sample", "context", "server"];
+const TABS: InspectorTab[] = ["construct", "sample", "context", "library", "server"];
 
 export function Inspector({
   tab,
@@ -49,6 +50,15 @@ export function Inspector({
   onUnarchive,
   skills,
   onReloadSkills,
+  libDocs,
+  libRoot,
+  libNotice,
+  libBusy,
+  onLibraryAdd,
+  onLibraryUpload,
+  onLibraryRemove,
+  onLibraryEmbed,
+  onLibraryReload,
 }: {
   tab: InspectorTab;
   onTab: (t: InspectorTab) => void;
@@ -83,7 +93,17 @@ export function Inspector({
   onUnarchive: () => void;
   skills: SkillIndex | null;
   onReloadSkills: () => void;
+  libDocs: LibraryDoc[] | null;
+  libRoot: string;
+  libNotice: string | null;
+  libBusy: string | null;
+  onLibraryAdd: (url: string) => void;
+  onLibraryUpload: (files: File[]) => void;
+  onLibraryRemove: (id: string) => void;
+  onLibraryEmbed: () => void;
+  onLibraryReload: () => void;
 }) {
+  const [libUrl, setLibUrl] = useState("");
   const [q, setQ] = useState("");
   const mode = modeById(modeId);
   const tag = reasonTag(family, modeId);
@@ -559,6 +579,129 @@ export function Inspector({
               </div>
             );
           })}
+        </div>
+      )}
+
+      {tab === "library" && (
+        <div className="rail-scroll sample-form">
+          <label className="tiny-check block">
+            <input
+              type="checkbox"
+              checked={settings.library}
+              onChange={(e) => setSetting("library", e.target.checked)}
+            />
+            let the model add, search and read documents
+          </label>
+          <p className="hint tiny">
+            Papers and long pages are read once into the library, cut into sections, and searched
+            later — in any chat. PDF, HTML, Markdown and text.
+          </p>
+          <form
+            className="lib-add"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (libUrl.trim()) {
+                onLibraryAdd(libUrl.trim());
+                setLibUrl("");
+              }
+            }}
+          >
+            <input
+              type="url"
+              placeholder="https://arxiv.org/abs/…"
+              value={libUrl}
+              onChange={(e) => setLibUrl(e.target.value)}
+              disabled={libBusy !== null}
+              aria-label="document address"
+            />
+            <button type="submit" className="btn" disabled={libBusy !== null || !libUrl.trim()}>
+              {libBusy === "add" ? "adding…" : "add"}
+            </button>
+          </form>
+          <label className="field lib-upload">
+            <span>or upload files</span>
+            <input
+              type="file"
+              multiple
+              accept=".pdf,.md,.markdown,.txt,.tex,.html,.htm,application/pdf,text/*"
+              disabled={libBusy !== null}
+              onChange={(e) => {
+                const files = [...(e.target.files ?? [])];
+                if (files.length) onLibraryUpload(files);
+                e.target.value = "";
+              }}
+            />
+          </label>
+          {libBusy && libBusy !== "add" && <p className="hint tiny">{libBusy}…</p>}
+          {libNotice && <p className="hint tiny">{libNotice}</p>}
+
+          <div className="group-label">Search</div>
+          {settings.embedUrl.trim() ? (
+            <p className="hint tiny">
+              By meaning and keywords, through <code className="break">{settings.embedUrl}</code>.{" "}
+              {libDocs && libDocs.some((d) => !d.embedded) && (
+                <button type="button" className="link-btn" onClick={onLibraryEmbed} disabled={libBusy !== null}>
+                  embed {libDocs.filter((d) => !d.embedded).length} not yet embedded
+                </button>
+              )}
+            </p>
+          ) : (
+            <p className="hint tiny">
+              By keywords only. Set an embeddings server in Setup to search by meaning too.
+            </p>
+          )}
+
+          <div className="group-label">
+            {libDocs ? `${libDocs.length} document${libDocs.length === 1 ? "" : "s"}` : "Documents"}{" "}
+            <button type="button" className="link-btn" onClick={onLibraryReload}>
+              rescan
+            </button>
+          </div>
+          {libDocs && !libDocs.length && (
+            <p className="muted pad">
+              Nothing yet. Add a paper above, ask the model to (“add arxiv.org/abs/… to the library”),
+              {libRoot ? (
+                <>
+                  {" "}
+                  or drop files into <code className="break">{libRoot}/inbox</code>
+                </>
+              ) : null}
+              .
+            </p>
+          )}
+          {(libDocs ?? []).map((d) => (
+            <div key={d.id} className="lib-doc">
+              <div className="lib-doc-title">{d.title}</div>
+              <div className="lib-doc-meta">
+                {d.pages ? `${d.pages} pages · ` : ""}
+                {d.chunks} chunks · {d.sections} sections · {d.kind}
+                {d.embedded ? " · embedded" : ""}
+              </div>
+              <code className="lib-doc-id">{d.id}</code>
+              <div className="lib-doc-actions">
+                {/^https?:\/\//.test(d.source) && (
+                  <a href={d.source} target="_blank" rel="noreferrer">
+                    source
+                  </a>
+                )}
+                <button
+                  type="button"
+                  className="lib-remove"
+                  onClick={() => onLibraryRemove(d.id)}
+                  disabled={libBusy !== null}
+                  title="Delete this document and its index from disk"
+                >
+                  remove
+                </button>
+              </div>
+            </div>
+          ))}
+          {libRoot && libDocs && libDocs.length > 0 && (
+            <p className="muted tiny">
+              Stored in <code className="break">{libRoot}</code>; drop files into its <code>inbox</code>{" "}
+              folder to add them.
+            </p>
+          )}
         </div>
       )}
 

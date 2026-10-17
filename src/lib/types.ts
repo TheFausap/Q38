@@ -55,6 +55,8 @@ export type ChatMessage = {
   opened?: number;
   /** skills (or skill files) the model read while writing this reply */
   skillsRead?: string[];
+  /** library documents this reply searched or read */
+  docsUsed?: string[];
   /** the pages this reply actually looked at, for the reader's benefit */
   sources?: { title: string; url: string }[];
   reasoning?: string;
@@ -219,6 +221,12 @@ export type Settings = {
   skills: boolean;
   /** characters of one skill file that may enter the prompt */
   skillChars: number;
+  /** let the model add documents to the library, search and read them */
+  library: boolean;
+  /** an OpenAI-compatible embeddings server (llama-server --embedding); blank = keyword search only */
+  embedUrl: string;
+  /** characters one doc_read may bring into the prompt */
+  docReadChars: number;
 };
 
 export type SearchProvider = "auto" | "searx" | "brave" | "tavily" | "duckduckgo";
@@ -286,4 +294,7 @@ export const DEFAULT_SETTINGS: Settings = {
   webPageChars: 6000,
   skills: true,
   skillChars: 24000,
+  library: true,
+  embedUrl: "",
+  docReadChars: 12000,
 };

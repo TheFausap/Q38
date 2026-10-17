@@ -216,12 +216,65 @@ is third-party reference material and is labelled as such in the prompt.
 `paper-lookup` works well with `web_fetch`: its endpoints (OpenAlex, Crossref, arXiv)
 are public JSON and Atom APIs the page reader accepts.
 
+## Library
+
+Papers and long documents do not fit through `web_fetch` — a PDF is refused outright, and a
+page read is a few thousand characters. So they go into the **library** instead: read once,
+cut into section-labelled chunks, kept on disk, and searched by the model in any later chat.
+
+```
+doc_add(url)                      download + index a PDF, HTML page, Markdown or text
+doc_search(query, doc?)           the passages that best answer it, with section and page
+doc_read(doc, section? | chunk?)  the outline, a whole section ("8.3", "Continuum Memory"), or read on
+```
+
+The model gets all three while the library is on (Library tab), with the documents it holds
+listed in `doc_search`. A typical turn: *"what does the Nested Learning paper say about CMS?"*
+→ `doc_add("https://arxiv.org/abs/2512.24695")` → `doc_search("continuum memory system update
+frequency")` → an answer quoting §7.1, p. 27. arXiv abstract links and OpenReview forums are
+fetched as their PDFs. Replies carry a `doc · <title>` badge and list the paper as a source.
+
+You can also add documents yourself — the Library tab takes a URL or uploaded files — or drop
+files into `<library>/inbox`; they are read in on the next refresh (anything unreadable is
+moved to `inbox/failed` with the reason beside it).
+
+**What happens to a PDF.** `pdf.js` pulls out the text layer page by page. The body font is
+whatever most characters are set in; a line is a section heading when it is numbered
+(`3.1 Associative Memory`, `B Proofs`) or a known name (`Abstract`, `References`), or set
+larger than the body — unless it is display maths, the arXiv side stamp or a run-in heading.
+Running heads, page numbers and end-of-line hyphens are cleaned up. Chunks are ~1.4k
+characters, cut at sentence ends, and never straddle two sections. The Nested Learning paper
+(52 pages) reads in about a second into 171 chunks with the paper's own 39-section outline.
+Limits: 50 MB per document; scanned PDFs with no text layer are refused (they need OCR); and
+**equations, tables and figures come through as garbled text** — the prose and structure are
+faithful, the maths is not.
+
+**Search.** Keyword ranking (BM25) always — exact terms matter in technical writing and it
+needs nothing running. Add an embeddings server and search also matches by meaning, the two
+rankings fused by reciprocal rank:
+
+```bash
+# a second llama-server, next to the chat model (~1 GB)
+llama-server -m Qwen3-Embedding-0.6B-Q8_0.gguf --embedding --pooling last -ub 2048 -b 2048 --port 8081
+```
+
+Then Setup → *embeddings server* = `http://127.0.0.1:8081` (or `Q38_EMBED_URL`). New
+documents are embedded on add; the Library tab offers to embed those added before. Query
+framing is picked from the model's id (Qwen3-Embedding's instruction, nomic's
+`search_query:`, e5's `query:`, bge's). If the server is down, search says so and falls back
+to keywords. There is no vector database: vectors are Float32 files beside each document and a
+brute-force scan over a personal library takes milliseconds.
+
+**Where it lives.** `<state>/library` (`~/.local/share/q38/library`, `%APPDATA%\q38\library`)
+or `Q38_LIBRARY_DIR`: `docs/<id>/` holds the original file, `chunks.json`, `meta.json` and
+`vectors.f32`. Downloads go through the same public-address guard as `web_fetch`.
+
 ## Tests
 
 ```bash
 npm test             # everything
-npm run test:unit    # pure logic: memory rules, web and skill tool text  (no DOM, no network)
-npm run test:server  # the web and skill routes over real HTTP against stubs and fixtures
+npm run test:unit    # pure logic: memory rules, web, skill and library tool text  (no DOM, no network)
+npm run test:server  # the web, skill and library routes over real HTTP against stubs and fixtures
 npm run test:ui      # the whole workbench in jsdom, against a stub model
 ```
 
@@ -239,13 +292,20 @@ npm run test:ui      # the whole workbench in jsdom, against a stub model
 - `tests/skills-routes.mjs` — frontmatter parsing, indexing a fixture folder,
   search ranking, reading reference files, refusing paths out of a skill and binary
   files, typo suggestions, and the three routes over HTTP.
+- `tests/library.test.ts` — the library tools on offer and the text an add, a search, a
+  section read and each kind of miss turn into.
+- `tests/library-routes.mjs` — PDF extraction on generated PDFs (`tests/pdf-fixture.mjs`):
+  the outline, running heads, hyphens, maths that is not a heading; chunking; BM25 search,
+  section reads by the paper's own numbers, budgets and continuation; dedupe, the inbox,
+  removal; hybrid search against a stub embeddings server and the fallback when it is down;
+  arXiv/OpenReview links; and every route, including the download guard and size limit.
 - `tests/ui.mjs` — the whole app in jsdom against `server/api.mjs`, a stub
   llama-server and a stub SearXNG: a full window archives instead of summarising, the
   register (not the bodies) goes out in the prompt, a turn recalls what it needs and an
   unrelated one does not, the model's `recall` tool round-trips, `/recall 3` pins a
   chunk, the model searches and then opens a page and the reply carries its sources, a
   private address is refused on demand, the model loads a skill and it comes back in
-  the one system message, a model that never stops calling tools is cut off and still
+  the one system message, the model adds a paper, searches it and the reply cites it, a model that never stops calling tools is cut off and still
   answers, unarchive brings every message back, and a
   store that refuses falls back to folding.
 

@@ -4,6 +4,7 @@ import http from "node:http";
 import https from "node:https";
 import os from "node:os";
 import path from "node:path";
+import { createEmbedder, createLibrary, LIBRARY_MAX_BYTES } from "./library.mjs";
 import { currentIndex, publicIndex, readSkill, searchSkills } from "./skills.mjs";
 
 const SKIP_DIRS = new Set([
@@ -1074,16 +1075,13 @@ const TEXTUAL_TYPES = [
   "application/atom+xml", "application/rss+xml",
 ];
 
-/** Open a public page and hand back something worth reading in a prompt. */
-export async function fetchPage(raw, { chars = 6000 } = {}) {
-  const checked = validateFetchUrl(raw);
-  if (!checked.ok) return { ok: false, ...checked };
-  const started = Date.now();
-  const limit = Math.max(500, Math.min(20_000, Math.round(Number(chars) || 6000)));
-  const signal = withTimeout();
-  const headers = { Accept: "text/html,application/xhtml+xml,text/plain,application/json", "User-Agent": WEB_USER_AGENT };
-
-  let current = checked.url;
+/**
+ * GET a public address, following redirects by hand so every hop is checked
+ * against the private-address guard. Hands back the open response (body not
+ * read yet) or a reason.
+ */
+async function openGuarded(start, { headers, signal }) {
+  let current = start;
   for (let hop = 0; hop <= WEB_MAX_REDIRECTS; hop++) {
     if (process.env.Q38_WEB_ALLOW_PRIVATE !== "1" && (await resolvesIntoPrivate(current.hostname))) {
       return { ok: false, error: `${current.hostname} resolves to a private address, so it is not read` };
@@ -1103,10 +1101,83 @@ export async function fetchPage(raw, { chars = 6000 } = {}) {
       continue;
     }
     if (!res.ok) return { ok: false, error: `${current.hostname} answered ${res.status}` };
+    return { ok: true, res, url: current };
+  }
+  return { ok: false, error: `too many redirects (more than ${WEB_MAX_REDIRECTS})` };
+}
+
+/** Read a response body as bytes, refusing (not trimming) past `limit`. */
+async function readBytesCapped(res, limit) {
+  const declared = Number(res.headers.get("content-length") || 0);
+  if (declared > limit) return { ok: false, error: `it is ${(declared / 1e6).toFixed(1)} MB, over the ${Math.round(limit / 1e6)} MB limit` };
+  if (!res.body) return { ok: true, bytes: Buffer.from(await res.arrayBuffer()) };
+  const reader = res.body.getReader();
+  const chunks = [];
+  let size = 0;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    size += value.length;
+    if (size > limit) {
+      await reader.cancel().catch(() => {});
+      return { ok: false, error: `it is over the ${Math.round(limit / 1e6)} MB limit` };
+    }
+    chunks.push(value);
+  }
+  return { ok: true, bytes: Buffer.concat(chunks) };
+}
+
+/**
+ * Download a whole document (a PDF, a long page) for the library: the same
+ * address guard as a page read, but a much larger byte budget and no text cut.
+ */
+export async function downloadDocument(raw, { maxBytes = 50 * 1024 * 1024, timeoutMs = 90_000 } = {}) {
+  const checked = validateFetchUrl(raw);
+  if (!checked.ok) return { ok: false, error: checked.error };
+  const opened = await openGuarded(checked.url, {
+    headers: {
+      Accept: "application/pdf,text/html,application/xhtml+xml,text/plain,text/markdown;q=0.9,*/*;q=0.5",
+      "User-Agent": WEB_USER_AGENT,
+    },
+    signal: AbortSignal.timeout ? AbortSignal.timeout(timeoutMs) : undefined,
+  });
+  if (!opened.ok) return opened;
+  const type = (opened.res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+  let read;
+  try {
+    read = await readBytesCapped(opened.res, maxBytes);
+  } catch (err) {
+    return { ok: false, error: `the download from ${opened.url.hostname} broke off: ${transportReason(err)}` };
+  }
+  if (!read.ok) return { ok: false, error: `not downloaded: ${read.error}` };
+  return { ok: true, bytes: read.bytes, type, url: checked.url.toString(), finalUrl: opened.url.toString() };
+}
+
+/** Open a public page and hand back something worth reading in a prompt. */
+export async function fetchPage(raw, { chars = 6000 } = {}) {
+  const checked = validateFetchUrl(raw);
+  if (!checked.ok) return { ok: false, ...checked };
+  const started = Date.now();
+  const limit = Math.max(500, Math.min(20_000, Math.round(Number(chars) || 6000)));
+  const signal = withTimeout();
+  const headers = { Accept: "text/html,application/xhtml+xml,text/plain,application/json", "User-Agent": WEB_USER_AGENT };
+
+  {
+    const opened = await openGuarded(checked.url, { headers, signal });
+    if (!opened.ok) return opened;
+    const res = opened.res;
+    const current = opened.url;
 
     const type = (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
     if (type && !TEXTUAL_TYPES.includes(type)) {
-      return { ok: false, error: `that is ${type}, and only text pages can be read` };
+      await res.body?.cancel().catch(() => {});
+      return {
+        ok: false,
+        error:
+          type === "application/pdf"
+            ? "that is application/pdf, which a page read cannot hold — add it to the library with doc_add and search it instead"
+            : `that is ${type}, and only text pages can be read`,
+      };
     }
     const { text: rawText, truncated: bytesTrimmed } = await readCapped(res);
     const isHtml = type.includes("html") || /<html|<body|<p[\s>]/i.test(rawText.slice(0, 2000));
@@ -1125,7 +1196,38 @@ export async function fetchPage(raw, { chars = 6000 } = {}) {
       ms: Date.now() - started,
     };
   }
-  return { ok: false, error: `too many redirects (more than ${WEB_MAX_REDIRECTS})` };
+}
+
+/* ------------------------------------------------------------- library */
+
+let library = null;
+function libraryRoot() {
+  return process.env.Q38_LIBRARY_DIR ? path.resolve(process.env.Q38_LIBRARY_DIR) : path.join(stateRoot(), "library");
+}
+/** One library per root (the tests move the root between runs). */
+function getLibrary() {
+  const root = libraryRoot();
+  if (!library || library.root !== root) {
+    library = createLibrary({ root, download: (u) => downloadDocument(u), htmlToText, titleOf });
+  }
+  return library;
+}
+
+/* embedders are cached per URL so the model id is asked for once */
+const embedders = new Map();
+function embedderFor(req) {
+  const url = String(req.headers["x-q38-embed-url"] || process.env.Q38_EMBED_URL || "").trim();
+  if (!url) return null;
+  if (!embedders.has(url)) embedders.set(url, createEmbedder(url, { apiKey: process.env.Q38_EMBED_API_KEY || "" }));
+  return embedders.get(url);
+}
+
+async function readJsonBody(req) {
+  try {
+    return JSON.parse((await readBody(req)).toString("utf8") || "{}");
+  } catch {
+    return null;
+  }
 }
 
 export function createApi() {
@@ -1381,6 +1483,81 @@ export function createApi() {
           return;
         }
         sendJson(res, 200, out);
+        return;
+      }
+
+      if (url.pathname.startsWith("/api/library/")) {
+        const lib = getLibrary();
+        const route = url.pathname.slice("/api/library/".length);
+        if (route === "list" && req.method === "GET") {
+          const inbox = await lib.scanInbox({ embedder: embedderFor(req) });
+          sendJson(res, 200, { ...lib.list(), inbox, embedUrl: embedderFor(req)?.base || "" });
+          return;
+        }
+        if (route === "add" && req.method === "POST") {
+          const payload = await readJsonBody(req);
+          const target = String(payload?.url ?? "").trim();
+          if (!target) {
+            sendJson(res, 400, { ok: false, error: "which document? give a url" });
+            return;
+          }
+          const out = await lib.addUrl(target, { embedder: embedderFor(req) });
+          sendJson(res, out.ok ? 200 : 422, out);
+          return;
+        }
+        if (route === "upload" && req.method === "POST") {
+          let bytes;
+          try {
+            bytes = await readBodyCapped(req, LIBRARY_MAX_BYTES);
+          } catch (err) {
+            sendJson(res, err?.statusCode || 413, { ok: false, error: err instanceof Error ? err.message : "upload failed" });
+            return;
+          }
+          const name = path.basename(decodeURIComponent(String(req.headers["x-q38-filename"] || "upload")));
+          const out = await lib.addBytes({
+            bytes,
+            type: String(req.headers["content-type"] || "").split(";")[0].trim().toLowerCase(),
+            name,
+            source: name,
+            embedder: embedderFor(req),
+          });
+          sendJson(res, out.ok ? 200 : 422, out);
+          return;
+        }
+        if (route === "search" && req.method === "GET") {
+          const out = await lib.search(url.searchParams.get("q") || "", {
+            k: url.searchParams.get("k") || 5,
+            doc: url.searchParams.get("doc") || "",
+            embedder: embedderFor(req),
+          });
+          sendJson(res, out.ok ? 200 : 404, out);
+          return;
+        }
+        if (route === "read" && req.method === "GET") {
+          const out = lib.read(url.searchParams.get("doc") || "", {
+            section: url.searchParams.get("section") || "",
+            chunk: url.searchParams.get("chunk"),
+            chars: url.searchParams.get("chars") || undefined,
+          });
+          sendJson(res, out.ok ? 200 : 404, out);
+          return;
+        }
+        if (route === "remove" && req.method === "POST") {
+          const payload = await readJsonBody(req);
+          const out = await lib.remove(String(payload?.id ?? ""));
+          sendJson(res, out.ok ? 200 : 404, out);
+          return;
+        }
+        if (route === "embed" && req.method === "POST") {
+          try {
+            const out = await lib.embedMissing(embedderFor(req));
+            sendJson(res, out.ok ? 200 : 400, out);
+          } catch (err) {
+            sendJson(res, 502, { ok: false, error: err instanceof Error ? err.message : String(err) });
+          }
+          return;
+        }
+        sendJson(res, 404, { ok: false, error: "unknown library route" });
         return;
       }
 

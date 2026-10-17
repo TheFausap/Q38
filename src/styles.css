@@ -527,7 +527,8 @@ button { cursor: pointer; }
 
 .tabs { display: flex; border-bottom: 1px solid var(--line); }
 .tab {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
   background: none;
   border: 0;
   border-bottom: 2px solid transparent;
@@ -1272,3 +1273,52 @@ button { cursor: pointer; }
   padding: 10px 0 4px;
 }
 .job-minimal .job-pip { text-transform: none; letter-spacing: 0.04em; }
+
+/* ---------------------------------------------------------- library tab */
+.lib-add { display: flex; gap: 8px; margin: 0 0 12px; }
+.lib-add input {
+  flex: 1;
+  min-width: 0;
+  background: #0f0e0c;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  color: var(--ink);
+  outline: none;
+}
+.lib-add input:focus { border-color: var(--brass); }
+.lib-add input::placeholder { color: var(--dim); }
+.lib-add .btn { padding: 5px 12px; font-size: 12px; }
+.lib-upload input[type="file"] { font-size: 12px; color: var(--muted); padding: 6px; }
+.lib-upload input[type="file"]::file-selector-button {
+  background: #16130f;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--ink);
+  padding: 4px 10px;
+  margin-right: 10px;
+  cursor: pointer;
+}
+.group-label .link-btn {
+  background: none;
+  border: 0;
+  padding: 0 0 0 6px;
+  color: var(--brass);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.lib-doc { border-top: 1px solid var(--line); padding: 10px 0 12px; }
+.lib-doc-title { font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+.lib-doc-meta { color: var(--muted); font-size: 12px; margin: 4px 0 2px; }
+.lib-doc-id { display: block; color: var(--dim); font-size: 11px; overflow-wrap: anywhere; }
+.lib-doc-actions { display: flex; gap: 16px; margin-top: 6px; font-size: 12px; }
+.lib-doc-actions a { color: var(--brass); }
+.lib-remove { background: none; border: 0; padding: 0; color: #e09a90; font-size: 12px; cursor: pointer; }
+.lib-remove:hover { text-decoration: underline; }
+.lib-remove:disabled { opacity: 0.4; cursor: not-allowed; }
+/* five tabs in a 320px rail: tighter tracking and padding so none is cut off */
+.rail.right .tab { letter-spacing: 0.06em; padding: 12px 4px; font-size: 10.5px; }

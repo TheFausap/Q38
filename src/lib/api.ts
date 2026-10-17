@@ -10,6 +10,7 @@ import type {
 } from "./types";
 import type { WebPageOutcome, WebSearchOutcome } from "./web";
 import type { SkillIndex, SkillReadOutcome, SkillSearchOutcome } from "./skills";
+import type { AddOutcome, LibraryList, ReadOutcome, SearchOutcome } from "./library";
 
 export type StreamHandlers = {
   onReasoning: (chunk: string) => void;
@@ -670,6 +671,83 @@ async function getSkills(path: string): Promise<Record<string, unknown>> {
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/* ------------------------------------------------------------- library */
+
+function libraryHeaders(settings: Settings, extra?: Record<string, string>): Record<string, string> {
+  const h: Record<string, string> = { ...extra };
+  if (settings.embedUrl.trim()) h["X-Q38-Embed-Url"] = settings.embedUrl.trim();
+  return h;
+}
+
+async function libraryCall<T>(path: string, settings: Settings, init: RequestInit = {}): Promise<T> {
+  try {
+    const res = await fetch(path, {
+      ...init,
+      headers: libraryHeaders(settings, init.headers as Record<string, string> | undefined),
+    });
+    const text = await res.text();
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      return { ok: false, error: `the workbench answered ${res.status} with something that is not JSON` } as T;
+    }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) } as T;
+  }
+}
+
+export function libraryList(settings: Settings): Promise<LibraryList> {
+  return libraryCall<LibraryList>("/api/library/list", settings);
+}
+
+export function libraryAdd(url: string, settings: Settings): Promise<AddOutcome> {
+  return libraryCall<AddOutcome>("/api/library/add", settings, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url }),
+  });
+}
+
+export function libraryUpload(file: File, settings: Settings): Promise<AddOutcome> {
+  return libraryCall<AddOutcome>("/api/library/upload", settings, {
+    method: "POST",
+    headers: {
+      "Content-Type": file.type || "application/octet-stream",
+      "X-Q38-Filename": encodeURIComponent(file.name),
+    },
+    body: file,
+  });
+}
+
+export function librarySearch(query: string, doc: string, settings: Settings): Promise<SearchOutcome> {
+  const q = new URLSearchParams({ q: query, k: "5" });
+  if (doc) q.set("doc", doc);
+  return libraryCall<SearchOutcome>(`/api/library/search?${q}`, settings);
+}
+
+export function libraryRead(
+  doc: string,
+  opts: { section?: string; chunk?: number | null; chars: number },
+  settings: Settings,
+): Promise<ReadOutcome> {
+  const q = new URLSearchParams({ doc, chars: String(opts.chars) });
+  if (opts.section) q.set("section", opts.section);
+  if (opts.chunk != null && Number.isFinite(opts.chunk)) q.set("chunk", String(opts.chunk));
+  return libraryCall<ReadOutcome>(`/api/library/read?${q}`, settings);
+}
+
+export function libraryRemove(id: string, settings: Settings): Promise<{ ok: boolean; error?: string }> {
+  return libraryCall("/api/library/remove", settings, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+}
+
+export function libraryEmbed(settings: Settings): Promise<{ ok: boolean; embedded?: number; model?: string; error?: string }> {
+  return libraryCall("/api/library/embed", settings, { method: "POST" });
 }
 
 /** Every skill the workbench can see, without their bodies. */
