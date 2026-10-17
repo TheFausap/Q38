@@ -159,12 +159,53 @@ if you really do want it reading your intranet.
 Settings live in Setup: provider, SearXNG URL, API key, results per search (1–8),
 characters per page (1 000–16 000).
 
+## Skills
+
+The model can consult **skills** — procedure manuals in the [Agent Skills](https://agentskills.io/)
+layout: a folder with a `SKILL.md` (frontmatter `name` + `description`, then the
+method) and often `references/` and `scripts/` beside it. Q38 reads them from
+`./skills` (or `Q38_SKILLS_DIR`) and fills that folder from K-Dense's
+[scientific-agent-skills](https://github.com/K-Dense-AI/scientific-agent-skills):
+
+```bash
+npm run skills:sync                  # the curated set (22 skills, ~4 MB)
+npm run skills:sync -- --add pysam   # …plus more
+npm run skills:sync -- sympy qutip   # exactly these
+npm run skills:sync -- --all         # the whole library (~177)
+npm run skills:sync -- --list        # what exists upstream
+```
+
+The curated set is physics and maths (`sympy`, `astropy`, `qutip`, `qiskit`,
+`pennylane`, `fluidsim`, `uncertainty-and-units`), statistics (`statistical-analysis`,
+`statsmodels`, `pymc`, `experimental-design`), ML (`transformers`, `pytorch-lightning`,
+`torch-geometric`), figures (`matplotlib`, `scientific-visualization`) and research
+method (`paper-lookup`, `scientific-critical-thinking`, `hypothesis-generation`,
+`scientific-brainstorming`, `peer-review`, `scientific-writing`) — nothing that needs an
+API key. `skills/` is git-ignored; the sync writes `skills/.source.json` with the
+upstream commit, and a re-sync removes only the skills it installed, never your own
+folders.
+
+**How the model sees them.** Up to 40 skills are listed inside a single `skill_load`
+tool — one line each, names as an enum — about 1k tokens for the curated set. Past 40
+the list would cost too much, so the model gets `skill_search` instead and finds names
+by asking. `skill_load` returns the `SKILL.md` body (24k characters by default,
+Setup → *characters per skill file*) plus the list of files beside it, which the
+model can open with `file=references/…`. A turn may load 4 skill files and run 3
+skill searches; the reply carries a `skill · qutip` badge for each one read.
+
+**What it will not do.** Q38 has no code execution, so a skill is text: the model is
+told it cannot run a skill's scripts and must show code rather than claim results.
+Reads stay inside the skill's own folder and only text files are served. Skill text
+is third-party reference material and is labelled as such in the prompt.
+`paper-lookup` works well with `web_fetch`: its endpoints (OpenAlex, Crossref, arXiv)
+are public JSON and Atom APIs the page reader accepts.
+
 ## Tests
 
 ```bash
 npm test             # everything
-npm run test:unit    # pure logic: memory rules + web tool text  (no DOM, no network)
-npm run test:server  # the web routes over real HTTP against stub providers
+npm run test:unit    # pure logic: memory rules, web and skill tool text  (no DOM, no network)
+npm run test:server  # the web and skill routes over real HTTP against stubs and fixtures
 npm run test:ui      # the whole workbench in jsdom, against a stub model
 ```
 
@@ -177,12 +218,19 @@ npm run test:ui      # the whole workbench in jsdom, against a stub model
   markup parsed from fixtures, a search round trip against a stub SearXNG, the
   private-address guard (both sides of it), redirect following and loops, content-type
   refusals, byte and character caps.
+- `tests/skills.test.ts` — the skill tools on offer (inline catalogue vs. search),
+  and the text a skill, a search and a miss turn into.
+- `tests/skills-routes.mjs` — frontmatter parsing, indexing a fixture folder,
+  search ranking, reading reference files, refusing paths out of a skill and binary
+  files, typo suggestions, and the three routes over HTTP.
 - `tests/ui.mjs` — the whole app in jsdom against `server/api.mjs`, a stub
   llama-server and a stub SearXNG: a full window archives instead of summarising, the
   register (not the bodies) goes out in the prompt, a turn recalls what it needs and an
   unrelated one does not, the model's `recall` tool round-trips, `/recall 3` pins a
   chunk, the model searches and then opens a page and the reply carries its sources, a
-  private address is refused on demand, unarchive brings every message back, and a
+  private address is refused on demand, the model loads a skill and it comes back in
+  the one system message, a model that never stops calling tools is cut off and still
+  answers, unarchive brings every message back, and a
   store that refuses falls back to folding.
 
 Scratch output lands in `tests/.bundle` and `tests/.tmp`, both ignored.

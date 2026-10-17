@@ -53,6 +53,8 @@ export type ChatMessage = {
   /** how many searches / page reads this reply cost */
   searched?: number;
   opened?: number;
+  /** skills (or skill files) the model read while writing this reply */
+  skillsRead?: string[];
   /** the pages this reply actually looked at, for the reader's benefit */
   sources?: { title: string; url: string }[];
   reasoning?: string;
@@ -213,6 +215,10 @@ export type Settings = {
   webResults: number;
   /** characters of one page that may enter the prompt */
   webPageChars: number;
+  /** let the model look up skills (procedure manuals) from the skills folder */
+  skills: boolean;
+  /** characters of one skill file that may enter the prompt */
+  skillChars: number;
 };
 
 export type SearchProvider = "auto" | "searx" | "brave" | "tavily" | "duckduckgo";
@@ -278,4 +284,6 @@ export const DEFAULT_SETTINGS: Settings = {
   searchApiKey: "",
   webResults: 5,
   webPageChars: 6000,
+  skills: true,
+  skillChars: 24000,
 };

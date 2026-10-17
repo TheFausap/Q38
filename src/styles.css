@@ -218,7 +218,8 @@ button { cursor: pointer; }
   opacity: 0.85;
 }
 
-.dropzone .link-btn {
+.dropzone .link-btn,
+.hint .link-btn {
   background: none;
   border: 0;
   padding: 0 0 0 6px;
@@ -227,7 +228,9 @@ button { cursor: pointer; }
   text-decoration: underline;
   text-underline-offset: 2px;
 }
-.dropzone .link-btn:hover { color: var(--brass-2); }
+.dropzone .link-btn:hover,
+.hint .link-btn:hover { color: var(--brass-2); }
+.hint .link-btn { font-size: inherit; padding: 0; cursor: pointer; }
 
 /* While a file is in the air the whole window is the target, and it says so. */
 /* The window accepts a drop anywhere, but says so quietly: an inset frame and

@@ -9,6 +9,7 @@ import type {
   Timings,
 } from "./types";
 import type { WebPageOutcome, WebSearchOutcome } from "./web";
+import type { SkillIndex, SkillReadOutcome, SkillSearchOutcome } from "./skills";
 
 export type StreamHandlers = {
   onReasoning: (chunk: string) => void;
@@ -655,6 +656,37 @@ export async function webFetchPage(
 ): Promise<WebPageOutcome> {
   const json = await postWeb("/api/web/fetch", { url, chars }, settings);
   return json as unknown as WebPageOutcome;
+}
+
+async function getSkills(path: string): Promise<Record<string, unknown>> {
+  try {
+    const res = await fetch(path);
+    const text = await res.text();
+    try {
+      return JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      return { ok: false, error: `the workbench answered ${res.status} with something that is not JSON` };
+    }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** Every skill the workbench can see, without their bodies. */
+export async function skillIndex(): Promise<SkillIndex> {
+  const json = await getSkills("/api/skills/index");
+  if (!Array.isArray(json.skills)) return { ok: false, skills: [], error: String(json.error || "no index") };
+  return json as unknown as SkillIndex;
+}
+
+export async function skillSearch(query: string): Promise<SkillSearchOutcome> {
+  return (await getSkills(`/api/skills/search?q=${encodeURIComponent(query)}&k=5`)) as SkillSearchOutcome;
+}
+
+export async function skillRead(name: string, file: string, chars: number): Promise<SkillReadOutcome> {
+  const q = new URLSearchParams({ name, chars: String(chars) });
+  if (file) q.set("file", file);
+  return (await getSkills(`/api/skills/read?${q}`)) as SkillReadOutcome;
 }
 
 /** How the job got on: a normal round, or a demo stream because nothing answered. */

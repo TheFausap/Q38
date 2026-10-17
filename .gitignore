@@ -9,3 +9,6 @@ dist
 .vite
 tests/.bundle
 tests/.tmp
+
+# installed by `npm run skills:sync` (third-party, not vendored)
+/skills/

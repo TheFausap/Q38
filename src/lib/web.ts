@@ -214,8 +214,11 @@ export function openingLine(host: string): string {
 }
 
 /** The same thing in words, for the strip above the composer. */
-export function activeWebText(active: { kind: "search" | "open"; label: string } | null): string {
+export function activeWebText(
+  active: { kind: "search" | "open" | "skill"; label: string } | null,
+): string {
   if (!active) return "";
+  if (active.kind === "skill") return `consulting skills: ${active.label}`;
   return active.kind === "search"
     ? `searching the web for “${active.label}”`
     : `reading ${active.label}`;

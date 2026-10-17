@@ -57,7 +57,7 @@ export function Chat({
   onFold: () => void;
   onUnfold: (index: number) => void;
   folding: boolean;
-  webActive: { kind: "search" | "open"; label: string } | null;
+  webActive: { kind: "search" | "open" | "skill"; label: string } | null;
   archives: ArchiveRef[];
   held: string[];
   memRoot: string;
@@ -184,15 +184,20 @@ export function Chat({
                   disabled={!!streamingId}
                 />
               )}
-              {!hidden && (m.recalled || m.searched || m.opened) ? (
+              {!hidden && (m.recalled || m.searched || m.opened || m.skillsRead?.length) ? (
                 <div className="mem-hop">
-                  {m.recalled
-                    ? `⇄ read ${m.recalled === 1 ? "a chunk" : `${m.recalled} chunks`} back off the disk`
-                    : ""}
-                  {m.recalled && (m.searched || m.opened) ? " · " : ""}
-                  {m.searched ? `⇄ searched the web ×${m.searched}` : ""}
-                  {m.searched && m.opened ? " · " : ""}
-                  {m.opened ? `⇄ opened ${m.opened} page${m.opened === 1 ? "" : "s"}` : ""}
+                  {[
+                    m.recalled
+                      ? `⇄ read ${m.recalled === 1 ? "a chunk" : `${m.recalled} chunks`} back off the disk`
+                      : "",
+                    m.searched ? `⇄ searched the web ×${m.searched}` : "",
+                    m.opened ? `⇄ opened ${m.opened} page${m.opened === 1 ? "" : "s"}` : "",
+                    m.skillsRead?.length
+                      ? `⇄ consulted ${m.skillsRead.length === 1 ? "a skill" : `${m.skillsRead.length} skills`}`
+                      : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
                 </div>
               ) : null}
               {hidden ? null : jobbed && pacing ? (
@@ -451,6 +456,11 @@ function MessageView({
         {!!message.continues && <span className="badge">continued ×{message.continues}</span>}
         {!!message.searched && <span className="badge web">searched ×{message.searched}</span>}
         {!!message.opened && <span className="badge web">read {message.opened} page{message.opened === 1 ? "" : "s"}</span>}
+        {message.skillsRead?.map((s) => (
+          <span key={s} className="badge web" title="skill read for this reply">
+            skill · {s}
+          </span>
+        ))}
         {fence.open && !live && peeled.content.trim() && (
           <span className="badge">open ```{fence.lang} block</span>
         )}

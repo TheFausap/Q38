@@ -34,6 +34,17 @@ process.env.WORKSPACE_DIR = WORK;
 /* the stub world is on 127.0.0.1, which the page guard refuses by default;
    that refusal has its own test below, and this is the documented switch */
 process.env.Q38_WEB_ALLOW_PRIVATE = "1";
+/* a skills folder of our own, so the run does not depend on skills:sync */
+const SKILLS = fileURLToPath(new URL(".tmp/skills", import.meta.url));
+fs.rmSync(SKILLS, { recursive: true, force: true });
+fs.mkdirSync(`${SKILLS}/qutip/references`, { recursive: true });
+fs.writeFileSync(
+  `${SKILLS}/qutip/SKILL.md`,
+  "---\nname: qutip\ndescription: Simulates open quantum systems with QuTiP. Lindblad master equations.\n---\n" +
+    "# QuTiP\n\nUse mesolve(H, rho0, tlist, c_ops) for the Lindblad master equation.\n",
+);
+fs.writeFileSync(`${SKILLS}/qutip/references/time_evolution.md`, "# Time evolution\n");
+process.env.Q38_SKILLS_DIR = SKILLS;
 
 const MIDDLEWARE_PORT = 8174;
 const STUB_PORT = 8175;
@@ -71,6 +82,9 @@ const stub = http.createServer((req, res) => {
     const asksForTool = /TOOLPLEASE/.test(newestText);
     const asksToSearch = /SEARCHPLEASE/.test(newestText);
     const asksToOpen = /OPENPLEASE/.test(newestText);
+    const asksForSkill = /SKILLPLEASE/.test(newestText);
+    /* GREEDYSKILL never stops asking: the workbench has to end the turn itself */
+    const greedy = /GREEDYSKILL/.test(newestText);
     const wireText = JSON.stringify(body.messages || []);
     const already = (name) =>
       wireText.includes(name === "recall" ? "### Recalled" : name === "web_search" ? "### Web results" : "### Page:");
@@ -119,6 +133,15 @@ const stub = http.createServer((req, res) => {
         ? "slowpoke retry helpers"
         : "retry timeout helpers src/lib/api.ts";
       emit("web_search", JSON.stringify({ query, count: 3 }));
+      return;
+    }
+    if (asksForSkill && !answered.has(sig("skill_load")) && !wireText.includes("### Skill:") && offered("skill_load")) {
+      answered.add(sig("skill_load"));
+      emit("skill_load", '{"name":"qutip"}');
+      return;
+    }
+    if (greedy && offered("skill_load")) {
+      emit("skill_load", '{"name":"qutip"}');
       return;
     }
     if (asksToOpen && !answered.has(sig("web_fetch")) && !already("web_fetch") && offered("web_fetch")) {
@@ -487,6 +510,7 @@ try {
   check(/searched ×1/.test(allText()), "the transcript marks the search");
   check(!!window.document.querySelector(".web-sources"), "and lists where it looked");
   check(/127\.0\.0\.1/.test(text(".web-sources")), `naming the host: ${text(".web-sources").slice(0, 120)}`);
+  await waitFor("the searched count is saved", () => stored().messages.some((m) => m.searched === 1), 5000);
   check(stored().messages.some((m) => m.searched === 1), "the reply records it");
   check(/Searched "/.test(text(".banner.web")), `the banner says so: ${text(".banner.web").slice(0, 110)}`);
 
@@ -509,6 +533,7 @@ try {
   check(/read 1 page/.test(allText()), "the transcript marks the read");
   check(calls.length > beforeOpen, "the turn went on");
   check(/Read 127\.0\.0\.1/.test(text(".banner.web")), `the banner names the page: ${text(".banner.web").slice(0, 120)}`);
+  await waitFor("the opened count is saved", () => stored().messages.some((m) => m.opened === 1), 5000);
   check(stored().messages.some((m) => m.opened === 1), "the reply records it");
 
   /* --- 10. the model says so while it is looking ---------------------- */
@@ -540,6 +565,46 @@ try {
   check(guarded.status === 502, `a private address is refused (${guarded.status})`);
   check(/only reads public addresses/.test(guardedBody.error), `in plain words: ${guardedBody.error}`);
   process.env.Q38_WEB_ALLOW_PRIVATE = "1";
+
+  /* --- 11b. the model consults a skill -------------------------------- */
+  const beforeSkill = calls.length;
+  await ask("how do I evolve a Lindblad master equation? SKILLPLEASE");
+  const skillCalls = calls.slice(beforeSkill).filter((c) => JSON.stringify(c.messages).includes("SKILLPLEASE"));
+  check(skillCalls.length === 2, `the skill turn was sent twice — to ask, then with the skill (${skillCalls.length})`);
+  const loadTool = skillCalls[0].tools?.find((t) => t.function?.name === "skill_load");
+  check(!!loadTool, "skill_load is offered when the folder has skills");
+  check(
+    loadTool.function.parameters.properties.name.enum?.includes("qutip"),
+    "a small library is offered by name",
+  );
+  check(/- qutip: Simulates open quantum systems/.test(loadTool.function.description), "with a line per skill");
+  const withSkill = skillCalls[1].messages;
+  check(
+    withSkill[0].role === "system" && withSkill.filter((m) => m.role === "system").length === 1,
+    "the skill rides in the one leading system message (Qwen templates allow no other)",
+  );
+  check(/### Skill: qutip/.test(withSkill[0].content), "the skill came back into the prompt");
+  check(/mesolve\(H, rho0, tlist, c_ops\)/.test(withSkill[0].content), "verbatim");
+  check(/references\/time_evolution\.md/.test(withSkill[0].content), "with the files it could open next");
+  check(/consulted a skill/.test(allText()), "the transcript marks the consultation");
+  await waitFor("the skill is saved on the reply", () =>
+    stored().messages.some((m) => (m.skillsRead ?? []).includes("qutip")), 5000);
+  check(stored().messages.some((m) => (m.skillsRead ?? []).includes("qutip")), "the reply records which skill");
+
+  /* --- 11c. a model that never stops asking still answers ------------- */
+  const beforeGreedy = calls.length;
+  await ask("keep looking things up GREEDYSKILL");
+  const greedyCalls = calls.slice(beforeGreedy);
+  check(greedyCalls.length >= 3 && greedyCalls.length <= 8, `the tool budget ends the asking (${greedyCalls.length} rounds)`);
+  const lastRound = greedyCalls[greedyCalls.length - 1];
+  check(!lastRound.tools?.length, "the last round offers no tools");
+  check(/budget for this turn is used up/.test(JSON.stringify(lastRound.messages)), "and tells the model why");
+  await waitFor("the greedy turn is saved", () => {
+    const msgs = stored().messages;
+    return /Noted\. The retry helper/.test(msgs[msgs.length - 1]?.content || "");
+  }, 5000);
+  const lastReply = stored().messages[stored().messages.length - 1];
+  check(/Noted\. The retry helper/.test(lastReply.content), "the turn ends with an answer, not a preamble");
 
   /* --- 12. unarchive brings everything back --------------------------- */
   const unarchive = byText(/unarchive/);

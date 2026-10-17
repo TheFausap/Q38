@@ -9,6 +9,7 @@ import {
 import { GROUPS, familyLabel, modeById, MODES, reasonTag } from "../lib/modes";
 import { formatClock, formatRate, type JobTick, type PaceStats } from "../lib/pacing";
 import type { ArchiveRef, Compaction, ModeFamily, Sampling, ServerStatus, Settings } from "../lib/types";
+import { SKILL_INLINE_LIMIT, type SkillIndex } from "../lib/skills";
 
 export type InspectorTab = "construct" | "sample" | "context" | "server";
 
@@ -46,6 +47,8 @@ export function Inspector({
   onRelease,
   onForget,
   onUnarchive,
+  skills,
+  onReloadSkills,
 }: {
   tab: InspectorTab;
   onTab: (t: InspectorTab) => void;
@@ -78,6 +81,8 @@ export function Inspector({
   onRelease: (id: string) => void;
   onForget: (id: string) => void;
   onUnarchive: () => void;
+  skills: SkillIndex | null;
+  onReloadSkills: () => void;
 }) {
   const [q, setQ] = useState("");
   const mode = modeById(modeId);
@@ -638,6 +643,32 @@ export function Inspector({
               : ""}
             . Tools need llama-server <code>--jinja</code>; a SearXNG URL or a key is set in Setup.
           </p>
+          <label className="tiny-check block">
+            <input
+              type="checkbox"
+              checked={settings.skills}
+              onChange={(e) => setSetting("skills", e.target.checked)}
+            />
+            let the model consult skills (procedure manuals)
+          </label>
+          {settings.skills && (
+            <p className="hint tiny">
+              {skills === null
+                ? "Looking for the skills folder…"
+                : skills.skills.length
+                  ? `${skills.skills.length} skill${skills.skills.length === 1 ? "" : "s"} — ${
+                      skills.skills.length <= SKILL_INLINE_LIMIT
+                        ? "listed to the model by name"
+                        : "found by the model through skill_search"
+                    }. `
+                  : skills.missing
+                    ? "No skills folder yet — run npm run skills:sync. "
+                    : "The skills folder is empty — run npm run skills:sync. "}
+              <button type="button" className="link-btn" onClick={onReloadSkills}>
+                rescan
+              </button>
+            </p>
+          )}
           <Slider
             label="cold start after"
             min={15}

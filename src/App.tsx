@@ -13,6 +13,9 @@ import {
   memoryGet,
   memoryList,
   memoryPut,
+  skillIndex,
+  skillRead,
+  skillSearch,
   streamChat,
   uploadWorkspaceFile,
   webFetchPage,
@@ -35,6 +38,16 @@ import {
   type ContextUsage,
 } from "./lib/context";
 import { modeById, reasonTag } from "./lib/modes";
+import {
+  SKILL_MAX_LOADS_PER_TURN,
+  SKILL_MAX_SEARCHES_PER_TURN,
+  skillSearchTapeLine,
+  skillSearchText,
+  skillTapeLine,
+  skillText,
+  skillTools,
+  type SkillIndex,
+} from "./lib/skills";
 import {
   MAX_TOOL_HOPS,
   WEB_MAX_CHARS,
@@ -239,7 +252,17 @@ export function App() {
   const [webLine, setWebLine] = useState<string | null>(null);
   const [webNotice, setWebNotice] = useState<string | null>(null);
   /** what the model is waiting on right now, if it is waiting on the network */
-  const [webActive, setWebActive] = useState<{ kind: "search" | "open"; label: string } | null>(null);
+  const [webActive, setWebActive] = useState<{ kind: "search" | "open" | "skill"; label: string } | null>(null);
+  /** the skills folder as the server last saw it (null until first asked) */
+  const [skills, setSkills] = useState<SkillIndex | null>(null);
+  const reloadSkills = useCallback(async () => {
+    const index = await skillIndex();
+    setSkills(index);
+    return index;
+  }, []);
+  useEffect(() => {
+    if (settings.skills) void reloadSkills();
+  }, [settings.skills, reloadSkills]);
   const [memBusy, setMemBusy] = useState<string | null>(null);
   const [memRoot, setMemRoot] = useState<string>("");
   const [folding, setFolding] = useState(false);
@@ -416,7 +439,9 @@ export function App() {
       webLive: webActive
         ? webActive.kind === "search"
           ? searchingLine(webActive.label)
-          : openingLine(webActive.label)
+          : webActive.kind === "skill"
+            ? `SKILL: READING ${webActive.label.toUpperCase()}…`
+            : openingLine(webActive.label)
         : null,
     };
     // `tick` is the clock that moves this view forward between tokens
@@ -1237,6 +1262,54 @@ export function App() {
     if (n === null) setFoldNotice("llama-server /tokenize is not answering — the estimate stands.");
   }, [currentSession, settings]);
 
+  /**
+   * The model asked for a skill, or for skills that match a question. What
+   * comes back is the file itself (cut to the budget) or the closest names —
+   * a miss included, with the nearest names, so it can correct itself.
+   */
+  const skillsForTool = useCallback(
+    async (searchCalls: { arguments: string }[], loadCalls: { arguments: string }[]) => {
+      const texts: string[] = [];
+      const read: string[] = [];
+      for (const call of searchCalls) {
+        const query = String(argsOf(call.arguments).query ?? "").trim();
+        if (!query) {
+          texts.push("### Skill search skipped\nThe call had no `query` in it.");
+          continue;
+        }
+        setWebActive({ kind: "skill", label: `search “${query.slice(0, 40)}”` });
+        const out = await skillSearch(query);
+        texts.push(skillSearchText(query, out));
+        setWebLine(skillSearchTapeLine(query, out));
+        setWebActive(null);
+      }
+      for (const call of loadCalls) {
+        const args = argsOf(call.arguments);
+        const name = String(args.name ?? "").trim();
+        const file = String(args.file ?? "").trim();
+        if (!name) {
+          texts.push("### No skill named\nThat call had no `name` in it.");
+          continue;
+        }
+        setWebActive({ kind: "skill", label: name });
+        const out = await skillRead(name, file, settings.skillChars);
+        texts.push(skillText(file ? `${name}/${file}` : name, out));
+        setWebLine(skillTapeLine(name, out));
+        setWebNotice(
+          out.ok
+            ? `Read the ${out.name} skill${out.file && out.file !== "SKILL.md" ? ` (${out.file})` : ""} — ${(
+                out.chars ?? 0
+              ).toLocaleString()} characters${out.truncated ? ", cut to the budget" : ""}.`
+            : `The model asked for skill "${name}": ${out.error}.`,
+        );
+        if (out.ok) read.push(out.file && out.file !== "SKILL.md" ? `${out.name}/${out.file}` : out.name!);
+        setWebActive(null);
+      }
+      return { texts, read };
+    },
+    [settings.skillChars],
+  );
+
   /* ---------------------------------------------------------- streaming */
 
   const runRound = async (args: {
@@ -1424,6 +1497,8 @@ export function App() {
     let recalls = 0;
     let searches = 0;
     let fetches = 0;
+    let skillSearches = 0;
+    let skillLoads = 0;
     const sources: { title: string; url: string }[] = [];
     /* Every tool result of this turn, in order. Each hop's round must see all
        of them, not only the latest hop's, or the model loses what it read. */
@@ -1436,7 +1511,18 @@ export function App() {
         searches < WEB_MAX_SEARCHES_PER_TURN ? called.filter((c) => c.name === "web_search") : [];
       const fetchCalls =
         fetches < WEB_MAX_FETCHES_PER_TURN ? called.filter((c) => c.name === "web_fetch") : [];
-      if (!recallCalls.length && !searchCalls.length && !fetchCalls.length) break;
+      const skillSearchCalls =
+        skillSearches < SKILL_MAX_SEARCHES_PER_TURN ? called.filter((c) => c.name === "skill_search") : [];
+      const skillLoadCalls =
+        skillLoads < SKILL_MAX_LOADS_PER_TURN ? called.filter((c) => c.name === "skill_load") : [];
+      if (
+        !recallCalls.length &&
+        !searchCalls.length &&
+        !fetchCalls.length &&
+        !skillSearchCalls.length &&
+        !skillLoadCalls.length
+      )
+        break;
 
       const session = sessionById(args.sessionId);
       const texts: string[] = [];
@@ -1463,6 +1549,14 @@ export function App() {
         hopSources = [...hopSources, ...read.sources];
         fetches += fetchCalls.length;
       }
+      let hopSkills: string[] = [];
+      if ((skillSearchCalls.length || skillLoadCalls.length) && !args.ctrl.signal.aborted) {
+        const got = await skillsForTool(skillSearchCalls, skillLoadCalls);
+        texts.push(...got.texts);
+        hopSkills = got.read;
+        skillSearches += skillSearchCalls.length;
+        skillLoads += skillLoadCalls.length;
+      }
       if (!texts.length) break;
 
       sources.push(...hopSources);
@@ -1488,6 +1582,9 @@ export function App() {
         recalled: (m.recalled ?? 0) + didRecall,
         searched: (m.searched ?? 0) + searchCalls.length,
         opened: (m.opened ?? 0) + fetchCalls.length,
+        skillsRead: hopSkills.length
+          ? [...new Set([...(m.skillsRead ?? []), ...hopSkills])]
+          : m.skillsRead,
       }));
     }
     /* The loop ends on a budget, not on the model being done: if the last
@@ -1510,7 +1607,7 @@ export function App() {
         extraSystem: [
           ...(args.extraSystem ?? []),
           ...gathered,
-          "The search and reading budget for this turn is used up and no tools are available now. " +
+          "The search, reading and skill budget for this turn is used up and no tools are available now. " +
             "Answer the user's request in full from the results above; say plainly if something " +
             "could not be confirmed.",
         ],
@@ -1739,6 +1836,7 @@ export function App() {
       const offered: unknown[] = [];
       if (onDisk && settings.recallTool) offered.push(RECALL_TOOL);
       if (settings.webSearch) offered.push(...WEB_TOOLS);
+      if (settings.skills) offered.push(...skillTools(skills));
       tools = offered.length ? offered : undefined;
     } catch (err) {
       setFoldNotice(`Could not prepare the context: ${err instanceof Error ? err.message : String(err)}`);
@@ -2161,6 +2259,8 @@ export function App() {
             onRelease={releaseBack}
             onForget={(id) => void forgetChunk(id)}
             onUnarchive={() => void unarchive()}
+            skills={skills}
+            onReloadSkills={() => void reloadSkills()}
           />
         )}
       </div>
@@ -2321,6 +2421,22 @@ function SettingsModal({
                 onChange({
                   ...settings,
                   webPageChars: Math.max(1000, Math.min(WEB_MAX_CHARS, Number(e.target.value) || 6000)),
+                })
+              }
+            />
+          </label>
+          <label className="field">
+            <span>characters per skill file</span>
+            <input
+              type="number"
+              min={4000}
+              max={48000}
+              step={2000}
+              value={settings.skillChars}
+              onChange={(e) =>
+                onChange({
+                  ...settings,
+                  skillChars: Math.max(4000, Math.min(48000, Number(e.target.value) || 24000)),
                 })
               }
             />

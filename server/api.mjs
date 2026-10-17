@@ -4,6 +4,7 @@ import http from "node:http";
 import https from "node:https";
 import os from "node:os";
 import path from "node:path";
+import { currentIndex, publicIndex, readSkill, searchSkills } from "./skills.mjs";
 
 const SKIP_DIRS = new Set([
   "node_modules",
@@ -1069,6 +1070,8 @@ async function resolvesIntoPrivate(hostname) {
 const TEXTUAL_TYPES = [
   "text/html", "text/plain", "text/markdown", "application/xhtml+xml",
   "application/json", "application/xml", "text/xml",
+  // arXiv's API and most journal feeds answer in Atom/RSS
+  "application/atom+xml", "application/rss+xml",
 ];
 
 /** Open a public page and hand back something worth reading in a prompt. */
@@ -1378,6 +1381,27 @@ export function createApi() {
           return;
         }
         sendJson(res, 200, out);
+        return;
+      }
+
+      if (url.pathname === "/api/skills/index" && req.method === "GET") {
+        sendJson(res, 200, publicIndex(currentIndex()));
+        return;
+      }
+
+      if (url.pathname === "/api/skills/search" && req.method === "GET") {
+        const query = url.searchParams.get("q") || "";
+        const k = Number(url.searchParams.get("k") || 5);
+        sendJson(res, 200, { ok: true, query, results: searchSkills(currentIndex(), query, k) });
+        return;
+      }
+
+      if (url.pathname === "/api/skills/read" && req.method === "GET") {
+        const out = readSkill(currentIndex(), url.searchParams.get("name") || "", {
+          file: url.searchParams.get("file") || "",
+          chars: url.searchParams.get("chars") || undefined,
+        });
+        sendJson(res, out.ok ? 200 : 404, out);
         return;
       }
 
