@@ -44,6 +44,12 @@ export type ChatStreamOptions = {
   continueFinal?: "content" | "reasoning_content" | null;
   /** extra user turn appended after the transcript (directive resume). */
   directive?: string;
+  /**
+   * This turn's tool exchange, after the transcript: the model's message
+   * carrying `tool_calls`, then one `tool` message per call with its result —
+   * the shape Qwen-family templates render as <tool_call>/<tool_response>.
+   */
+  toolTrail?: WireMessage[];
   stream?: boolean;
 };
 
@@ -358,7 +364,8 @@ export async function countTokens(text: string, settings: Settings): Promise<num
   }
 }
 
-type WireMessage = { role: string; content: string };
+export type WireToolCall = { id: string; type: "function"; function: { name: string; arguments: string } };
+export type WireMessage = { role: string; content: string; tool_calls?: WireToolCall[]; tool_call_id?: string };
 
 export function buildWireMessages(
   messages: ChatMessage[],
@@ -386,6 +393,7 @@ export function buildWireMessages(
     }
     out.push({ role: m.role, content });
   }
+  if (opts.toolTrail?.length) out.push(...opts.toolTrail);
   if (opts.directive?.trim()) {
     out.push({ role: "user", content: opts.directive.trim() });
   }

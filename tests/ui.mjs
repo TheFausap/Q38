@@ -617,11 +617,17 @@ try {
   const withSkill = skillCalls[1].messages;
   check(
     withSkill[0].role === "system" && withSkill.filter((m) => m.role === "system").length === 1,
-    "the skill rides in the one leading system message (Qwen templates allow no other)",
+    "still one leading system message (Qwen templates allow no other)",
   );
-  check(/### Skill: qutip/.test(withSkill[0].content), "the skill came back into the prompt");
-  check(/mesolve\(H, rho0, tlist, c_ops\)/.test(withSkill[0].content), "verbatim");
-  check(/references\/time_evolution\.md/.test(withSkill[0].content), "with the files it could open next");
+  const callTurn = withSkill.find((m) => m.role === "assistant" && m.tool_calls?.length);
+  const skillResult = withSkill.find((m) => m.role === "tool");
+  check(!!callTurn && callTurn.tool_calls[0].function.name === "skill_load", "the model's call is sent back as an assistant tool_calls message");
+  check(!!skillResult && skillResult.tool_call_id === callTurn.tool_calls[0].id, "answered by a tool message with the call's id");
+  check(withSkill.indexOf(skillResult) === withSkill.indexOf(callTurn) + 1, "right after the call");
+  check(/### Skill: qutip/.test(skillResult.content), "the skill came back as the tool's result");
+  check(/mesolve\(H, rho0, tlist, c_ops\)/.test(skillResult.content), "verbatim");
+  check(/references\/time_evolution\.md/.test(skillResult.content), "with the files it could open next");
+  check(!/### Skill: qutip/.test(withSkill[0].content), "and not in the system message");
   check(/consulted a skill/.test(allText()), "the transcript marks the consultation");
   await waitFor("the skill is saved on the reply", () =>
     stored().messages.some((m) => (m.skillsRead ?? []).includes("qutip")), 5000);
@@ -639,17 +645,19 @@ try {
   check(/you DO have internet access/.test(briefed.content) && /you CAN download and read PDFs/.test(briefed.content), "and says they are real");
   check(docCalls[0].messages.filter((m) => m.role === "system").length === 1, "still one system message");
   const afterAdd = docCalls[1].messages;
-  check(
-    afterAdd[0].role === "system" && afterAdd.filter((m) => m.role === "system").length === 1,
-    "library results ride in the one system message",
-  );
-  check(/### Added to the library: Nested Memories for Continual Learners/.test(afterAdd[0].content), "the paper was downloaded and read");
-  check(/2 Continuum Memory System — p\. 2/.test(afterAdd[0].content), "with its outline");
-  const afterSearch = docCalls[2].messages[0].content;
+  const toolText = (msgs) => msgs.filter((m) => m.role === "tool").map((m) => m.content).join("\n");
+  check(afterAdd.filter((m) => m.role === "system").length === 1, "still one system message");
+  check(/### Added to the library: Nested Memories for Continual Learners/.test(toolText(afterAdd)), "the paper was downloaded and read");
+  check(/2 Continuum Memory System — p\. 2/.test(toolText(afterAdd)), "with its outline");
+  const docLast = docCalls[2].messages;
+  const afterSearch = toolText(docLast);
   check(/### Library passages for/.test(afterSearch), "the search came back");
   check(/§ 2 Continuum Memory System, p\. 2/.test(afterSearch), "pointing at the right section and page");
   check(/each with its own update frequency/.test(afterSearch), "verbatim");
   check(/### Added to the library/.test(afterSearch), "and the add is still in view on the last round");
+  const exchange = docLast.filter((m) => m.tool_calls?.length || m.role === "tool").map((m) => (m.role === "tool" ? "tool" : m.tool_calls[0].function.name));
+  check(JSON.stringify(exchange) === JSON.stringify(["doc_add", "tool", "doc_search", "tool"]), `the exchange is in order: ${exchange.join(" → ")}`);
+  check(docLast[docLast.length - 1].role === "tool", "and the model answers after the last result, in a reply of its own");
   check(/used a library document/.test(allText()), "the transcript marks it");
   await waitFor("the reply records the paper", () =>
     stored().messages.some((m) => (m.docsUsed ?? []).includes("Nested Memories for Continual Learners")), 5000);
@@ -663,7 +671,9 @@ try {
   await ask("which update frequencies does the paper use? TEXTCALLPLEASE");
   const textCalls = calls.slice(beforeText).filter((c) => JSON.stringify(c.messages).includes("TEXTCALLPLEASE"));
   check(textCalls.length === 2, `a text call is run and the turn sent again (${textCalls.length})`);
-  const afterText = textCalls[1].messages[0].content;
+  const afterText = textCalls[1].messages.filter((m) => m.role === "tool").map((m) => m.content).join("\n");
+  const textTurn = textCalls[1].messages.find((m) => m.tool_calls?.length);
+  check(!/<tool_call>/.test(textTurn?.content || "") && /Let me search the library\./.test(textTurn?.content || ""), "the text call goes back as a real call, its prose kept");
   check(/### Library passages for "continuum memory update frequency"/.test(afterText), "the call ran with the query the model wrote");
   check(/2 Continuum Memory System/.test(afterText), "doc_id was read as doc: the search stayed in that paper");
   await waitFor("the text-call reply is saved", () => {

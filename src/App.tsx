@@ -30,6 +30,7 @@ import {
   webFetchPage,
   webSearch,
 } from "./lib/api";
+import type { WireMessage } from "./lib/api";
 import {
   activeCompaction,
   cutIdOf,
@@ -162,7 +163,8 @@ function blankSession(modeId: string, family: ModeFamily): Session {
   };
 }
 
-type Round = { body: string; reasoning: string; finish: FinishInfo };
+/** `fresh` is what this round itself wrote, tool markup removed. */
+type Round = { body: string; reasoning: string; finish: FinishInfo; fresh: string };
 
 /** Longest drop that may be written into ./workspace (mirrors server/api.mjs). */
 const DROP_MAX_BYTES = 8 * 1024 * 1024;
@@ -1539,8 +1541,10 @@ export function App() {
     fallbackDirective?: string;
     /** more system turns for this round only (recalled chunks, tool results). */
     extraSystem?: string[];
-    /** tools offered this round; only the recall tool exists. */
+    /** tools offered this round */
     tools?: unknown[];
+    /** this turn's tool exchange so far: the model's calls and their results */
+    trail?: WireMessage[];
   }): Promise<Round> => {
     const { acc, start } = args;
     const resuming = Boolean(start.body || start.reasoning);
@@ -1548,13 +1552,23 @@ export function App() {
     let freshReasoning = "";
     let finish: FinishInfo = { ...EMPTY_FINISH };
 
-    const settle = () =>
+    /* After tool results the model starts a new reply rather than continuing
+       its last one, so the two are separate paragraphs, not one sentence. */
+    const afterTools = Boolean(args.trail?.length) && !args.continueFinal;
+    const settleWith = (fresh: string) =>
       resuming
         ? {
-            body: stitchContinuation(start.body, freshBody),
-            reasoning: stitchContinuation(start.reasoning, freshReasoning),
+            body: afterTools
+              ? fresh.trim()
+                ? `${start.body.trimEnd()}${start.body.trim() ? "\n\n" : ""}${fresh.trimStart()}`
+                : start.body
+              : stitchContinuation(start.body, fresh),
+            reasoning: afterTools
+              ? [start.reasoning.trimEnd(), freshReasoning.trimStart()].filter(Boolean).join("\n\n")
+              : stitchContinuation(start.reasoning, freshReasoning),
           }
-        : { body: freshBody, reasoning: freshReasoning };
+        : { body: fresh, reasoning: freshReasoning };
+    const settle = () => settleWith(freshBody);
 
     const attempt = async (continueFinal: "content" | "reasoning_content" | null, directive?: string) => {
       const result = await streamChat(
@@ -1622,6 +1636,7 @@ export function App() {
           continueFinal,
           directive,
           tools: args.tools,
+          toolTrail: args.trail,
         },
       );
       if (result.demo) setDemoNotice(true);
@@ -1643,11 +1658,11 @@ export function App() {
       }
     }
 
-    const s = settle();
     /* Tool calls the model wrote as text (llama-server's parser did not
        recognise the format): run them like real ones, and keep the markup
        out of the reply. Structured calls get their argument names mapped
        onto the declared ones too — models guess `doc_id` for `doc`. */
+    let fresh = freshBody;
     if (args.tools?.length) {
       if (finish.calls?.length) {
         finish = {
@@ -1660,10 +1675,10 @@ export function App() {
           }),
         };
       } else {
-        const found = parseTextToolCalls(s.body, args.tools);
+        const found = parseTextToolCalls(freshBody, args.tools);
         if (found.calls.length) {
           finish = { ...finish, calls: found.calls, reason: "tool_calls" };
-          s.body = found.cleaned;
+          fresh = found.cleaned;
           setWebNotice(
             `The model wrote ${found.calls.length === 1 ? "its tool call" : `${found.calls.length} tool calls`} as text (${found.calls
               .map((c) => c.name)
@@ -1672,6 +1687,7 @@ export function App() {
         }
       }
     }
+    const s = settleWith(fresh);
     acc.body = s.body;
     acc.reasoning = s.reasoning;
     patchMessage(args.sessionId, args.messageId, (m) => ({
@@ -1681,7 +1697,7 @@ export function App() {
       finishReason: finish.reason || m.finishReason,
       truncated: finish.truncated,
     }));
-    return { body: s.body, reasoning: s.reasoning, finish };
+    return { body: s.body, reasoning: s.reasoning, finish, fresh };
   };
 
   /**
@@ -1736,145 +1752,183 @@ export function App() {
        machine into a very slow morning; the prose already streamed (if any) is
        appended to, never thrown away. */
     let hops = 0;
-    let recalls = 0;
-    let searches = 0;
-    let fetches = 0;
-    let skillSearches = 0;
-    let skillLoads = 0;
-    let docAdds = 0;
-    let docSearches = 0;
-    let docReads = 0;
+    /* per-turn caps, per tool: a confused model cannot loop the machine */
+    const caps: Record<string, number> = {
+      recall: MAX_RECALL_HOPS,
+      web_search: WEB_MAX_SEARCHES_PER_TURN,
+      web_fetch: WEB_MAX_FETCHES_PER_TURN,
+      skill_search: SKILL_MAX_SEARCHES_PER_TURN,
+      skill_load: SKILL_MAX_LOADS_PER_TURN,
+      doc_add: DOC_MAX_ADDS_PER_TURN,
+      doc_search: DOC_MAX_SEARCHES_PER_TURN,
+      doc_read: DOC_MAX_READS_PER_TURN,
+    };
+    const used: Record<string, number> = {};
     const sources: { title: string; url: string }[] = [];
-    /* Every tool result of this turn, in order. Each hop's round must see all
-       of them, not only the latest hop's, or the model loses what it read. */
-    const gathered: string[] = [];
-    while (!args.ctrl.signal.aborted && hops < MAX_TOOL_HOPS) {
-      const called = round.finish.calls ?? [];
-      const recallCalls =
-        recalls < MAX_RECALL_HOPS ? called.filter((c) => c.name === "recall") : [];
-      const searchCalls =
-        searches < WEB_MAX_SEARCHES_PER_TURN ? called.filter((c) => c.name === "web_search") : [];
-      const fetchCalls =
-        fetches < WEB_MAX_FETCHES_PER_TURN ? called.filter((c) => c.name === "web_fetch") : [];
-      const skillSearchCalls =
-        skillSearches < SKILL_MAX_SEARCHES_PER_TURN ? called.filter((c) => c.name === "skill_search") : [];
-      const skillLoadCalls =
-        skillLoads < SKILL_MAX_LOADS_PER_TURN ? called.filter((c) => c.name === "skill_load") : [];
-      const docAddCalls = docAdds < DOC_MAX_ADDS_PER_TURN ? called.filter((c) => c.name === "doc_add") : [];
-      const docSearchCalls =
-        docSearches < DOC_MAX_SEARCHES_PER_TURN ? called.filter((c) => c.name === "doc_search") : [];
-      const docReadCalls = docReads < DOC_MAX_READS_PER_TURN ? called.filter((c) => c.name === "doc_read") : [];
-      if (
-        !recallCalls.length &&
-        !searchCalls.length &&
-        !fetchCalls.length &&
-        !skillSearchCalls.length &&
-        !skillLoadCalls.length &&
-        !docAddCalls.length &&
-        !docSearchCalls.length &&
-        !docReadCalls.length
-      )
-        break;
+    /* The turn's tool exchange, in the shape the model was trained on: its
+       message with the calls, then one `tool` message per call. Every later
+       round carries all of it, so nothing read earlier is lost. */
+    const trail: WireMessage[] = [];
+    let callSeq = 0;
 
-      const session = sessionById(args.sessionId);
-      const texts: string[] = [];
-      let hopSources: { title: string; url: string }[] = [];
-      let didRecall = 0;
-
-      if (recallCalls.length && session) {
-        const back = await recallForTool(session, recallCalls);
-        texts.push(...back);
-        if (back.length) {
-          recalls++;
-          didRecall = 1;
+    /** One call, run by the handler that owns its tool; the text is its result. */
+    const runOne = async (call: { id: string; name: string; arguments: string }) => {
+      const one = [call];
+      const stats = { recalled: 0, searched: 0, opened: 0, skills: [] as string[], docs: [] as string[] };
+      let text = "";
+      switch (call.name) {
+        case "recall": {
+          const session = sessionById(args.sessionId);
+          const back = session ? await recallForTool(session, one) : [];
+          if (back.length) stats.recalled = 1;
+          text = back.join("\n\n") || "### Nothing on disk matched\nAnswer from what is in the conversation.";
+          break;
         }
+        case "web_search": {
+          const r = await webForTool(one);
+          text = r.texts.join("\n\n");
+          sources.push(...r.sources);
+          stats.searched = 1;
+          break;
+        }
+        case "web_fetch": {
+          const r = await webPageForTool(one);
+          text = r.texts.join("\n\n");
+          sources.push(...r.sources);
+          stats.opened = 1;
+          break;
+        }
+        case "skill_search":
+        case "skill_load": {
+          const r = call.name === "skill_search" ? await skillsForTool(one, []) : await skillsForTool([], one);
+          text = r.texts.join("\n\n");
+          stats.skills = r.read;
+          break;
+        }
+        case "doc_add":
+        case "doc_search":
+        case "doc_read": {
+          const r = await libraryForTool(
+            call.name === "doc_add" ? one : [],
+            call.name === "doc_search" ? one : [],
+            call.name === "doc_read" ? one : [],
+          );
+          text = r.texts.join("\n\n");
+          sources.push(...r.sources);
+          stats.docs = r.used;
+          break;
+        }
+        default:
+          text = `### No tool named ${call.name}\nThe tools on offer are listed in the system message.`;
       }
-      if (searchCalls.length) {
-        const found = await webForTool(searchCalls);
-        texts.push(...found.texts);
-        hopSources = [...hopSources, ...found.sources];
-        searches += searchCalls.length;
-      }
-      if (fetchCalls.length && !args.ctrl.signal.aborted) {
-        const read = await webPageForTool(fetchCalls);
-        texts.push(...read.texts);
-        hopSources = [...hopSources, ...read.sources];
-        fetches += fetchCalls.length;
-      }
-      let hopSkills: string[] = [];
-      if ((skillSearchCalls.length || skillLoadCalls.length) && !args.ctrl.signal.aborted) {
-        const got = await skillsForTool(skillSearchCalls, skillLoadCalls);
-        texts.push(...got.texts);
-        hopSkills = got.read;
-        skillSearches += skillSearchCalls.length;
-        skillLoads += skillLoadCalls.length;
-      }
-      let hopDocs: string[] = [];
-      if ((docAddCalls.length || docSearchCalls.length || docReadCalls.length) && !args.ctrl.signal.aborted) {
-        const got = await libraryForTool(docAddCalls, docSearchCalls, docReadCalls);
-        texts.push(...got.texts);
-        hopSources = [...hopSources, ...got.sources];
-        hopDocs = got.used;
-        docAdds += docAddCalls.length;
-        docSearches += docSearchCalls.length;
-        docReads += docReadCalls.length;
-      }
-      if (!texts.length) break;
+      return { text: text || "### The tool returned nothing", stats };
+    };
 
-      sources.push(...hopSources);
-      gathered.push(...texts);
+    /** The model's calls as the template wants them: ids, type, JSON arguments. */
+    const asWireCalls = (calls: { id: string; name: string; arguments: string }[]) =>
+      calls.map((c) => ({
+        ...c,
+        id: c.id || `call_${args.messageId.slice(0, 8)}_${++callSeq}`,
+      }));
+
+    while (!args.ctrl.signal.aborted && hops < MAX_TOOL_HOPS) {
+      const called = asWireCalls(round.finish.calls ?? []);
+      if (!called.length) break;
+      const runnable = called.filter((c) => (used[c.name] ?? 0) < (caps[c.name] ?? 4));
+      if (!runnable.length) break; // every call is over its cap: the final round answers
+
+      const responses: WireMessage[] = [];
+      const hop = { recalled: 0, searched: 0, opened: 0, skills: [] as string[], docs: [] as string[] };
+      for (const c of called) {
+        if (args.ctrl.signal.aborted) break;
+        if ((used[c.name] ?? 0) >= (caps[c.name] ?? 4)) {
+          responses.push({
+            role: "tool",
+            tool_call_id: c.id,
+            content: `### Not run\n${c.name} has been used as often as one turn allows. Answer with what you have.`,
+          });
+          continue;
+        }
+        used[c.name] = (used[c.name] ?? 0) + 1;
+        const r = await runOne(c);
+        responses.push({ role: "tool", tool_call_id: c.id, content: r.text });
+        hop.recalled += r.stats.recalled;
+        hop.searched += r.stats.searched;
+        hop.opened += r.stats.opened;
+        hop.skills.push(...r.stats.skills);
+        hop.docs.push(...r.stats.docs);
+      }
+      if (args.ctrl.signal.aborted) break;
+
+      trail.push(
+        {
+          role: "assistant",
+          content: round.fresh.trim(),
+          tool_calls: called.map((c) => ({ id: c.id, type: "function" as const, function: { name: c.name, arguments: c.arguments } })),
+        },
+        ...responses,
+      );
       hops++;
-      round = await runRound({
-        sessionId: args.sessionId,
-        messageId: args.messageId,
-        wire: round.body.trim()
-          ? [...args.wireBefore, assistantMessage(round.body)]
-          : args.wireBefore,
-        systemExtra: args.systemExtra,
-        ctrl: args.ctrl,
-        acc,
-        start: { body: round.body, reasoning: round.reasoning },
-        continueFinal: round.body.trim() ? "content" : args.first.continueFinal,
-        directive: undefined,
-        extraSystem: [...(args.extraSystem ?? []), ...gathered],
-        tools: args.tools,
-      });
       patchMessage(args.sessionId, args.messageId, (m) => ({
         ...m,
-        recalled: (m.recalled ?? 0) + didRecall,
-        searched: (m.searched ?? 0) + searchCalls.length,
-        opened: (m.opened ?? 0) + fetchCalls.length,
-        skillsRead: hopSkills.length
-          ? [...new Set([...(m.skillsRead ?? []), ...hopSkills])]
-          : m.skillsRead,
-        docsUsed: hopDocs.length ? [...new Set([...(m.docsUsed ?? []), ...hopDocs])] : m.docsUsed,
+        recalled: (m.recalled ?? 0) + Math.min(1, hop.recalled),
+        searched: (m.searched ?? 0) + hop.searched,
+        opened: (m.opened ?? 0) + hop.opened,
+        skillsRead: hop.skills.length ? [...new Set([...(m.skillsRead ?? []), ...hop.skills])] : m.skillsRead,
+        docsUsed: hop.docs.length ? [...new Set([...(m.docsUsed ?? []), ...hop.docs])] : m.docsUsed,
       }));
-    }
-    /* The loop ends on a budget, not on the model being done: if the last
-       round still asked for a tool, it streamed only a preamble ("let me look
-       further…") and never answered. Give it one last round with no tools on
-       offer and everything it read, so the turn ends with an answer. */
-    if (!args.ctrl.signal.aborted && round.finish.calls?.length) {
       round = await runRound({
         sessionId: args.sessionId,
         messageId: args.messageId,
-        wire: round.body.trim()
-          ? [...args.wireBefore, assistantMessage(round.body)]
-          : args.wireBefore,
+        wire: args.wireBefore,
         systemExtra: args.systemExtra,
         ctrl: args.ctrl,
         acc,
         start: { body: round.body, reasoning: round.reasoning },
-        continueFinal: round.body.trim() ? "content" : args.first.continueFinal,
+        continueFinal: null,
+        directive: undefined,
+        extraSystem: args.extraSystem,
+        tools: args.tools,
+        trail: [...trail],
+      });
+    }
+    /* The loop ends on a budget, not on the model being done: if the last
+       round still asked for a tool, it wrote only a preamble ("let me look
+       further…") and never answered. Answer those calls with "not run", and
+       give it one last round with no tools on offer, so the turn ends with an
+       answer built from everything it read. */
+    if (!args.ctrl.signal.aborted && round.finish.calls?.length) {
+      const pending = asWireCalls(round.finish.calls);
+      trail.push(
+        {
+          role: "assistant",
+          content: round.fresh.trim(),
+          tool_calls: pending.map((c) => ({ id: c.id, type: "function" as const, function: { name: c.name, arguments: c.arguments } })),
+        },
+        ...pending.map((c) => ({
+          role: "tool",
+          tool_call_id: c.id,
+          content: "### Not run\nThe tool budget for this turn is used up.",
+        })),
+      );
+      round = await runRound({
+        sessionId: args.sessionId,
+        messageId: args.messageId,
+        wire: args.wireBefore,
+        systemExtra: args.systemExtra,
+        ctrl: args.ctrl,
+        acc,
+        start: { body: round.body, reasoning: round.reasoning },
+        continueFinal: null,
         directive: undefined,
         extraSystem: [
           ...(args.extraSystem ?? []),
-          ...gathered,
           "The search, reading, skill and library budget for this turn is used up and no tools are available now. " +
-            "Answer the user's request in full from the results above; say plainly if something " +
+            "Answer the user's request in full from the tool results above; say plainly if something " +
             "could not be confirmed.",
         ],
         tools: undefined,
+        trail: [...trail],
       });
     }
     if (sources.length) {
@@ -1895,10 +1949,14 @@ export function App() {
       });
       if (!step.proceed || args.ctrl.signal.aborted) break;
       continues++;
+      /* after a tool exchange the reply being continued is this round's own
+         text, sitting after the trail; otherwise it is the whole body */
+      const tail = trail.length ? round.fresh : round.body;
       round = await runRound({
         sessionId: args.sessionId,
         messageId: args.messageId,
-        wire: [...args.wireBefore, assistantMessage(round.body)],
+        wire: trail.length ? args.wireBefore : [...args.wireBefore, assistantMessage(round.body)],
+        trail: trail.length ? [...trail, { role: "assistant", content: tail }] : undefined,
         systemExtra: args.systemExtra,
         ctrl: args.ctrl,
         acc,
