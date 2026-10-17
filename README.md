@@ -38,6 +38,22 @@ llama-server \
   --spec-type draft-mtp --spec-draft-n-max 3
 ```
 
+for smaller cards, using the turboquant fork, you can fit this in 6GB of VRAM and 32GB of RAM, but expect
+very slow response times.
+
+```bash
+llama-server \
+  -m Qwen3.8-27B-Turbo-Brilliance-50X-RI-NEO-MAX-MTP-Q4_K_M.gguf \
+  --alias q38-max \
+  --host 0.0.0.0 --port 8080 \
+  -c 65536 \
+  --cache-type-k turbo4 --cache-type-v turbo3 \
+  -fa on --jinja -ngl 6 --reasoning-format deepseek \
+  --temp 0.7 --top-k 64 --min-p 0.05 --top-p 0.95 --repeat-penalty 1.0 \
+  --spec-type draft-mtp --spec-draft-n-max 3 --no-cache-prompt \
+  -lm none --fit off
+```
+
 Notes from the model card:
 
 - Context **24k minimum**, **64k+** for real coding sessions (model max ~256k)
