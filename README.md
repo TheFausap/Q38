@@ -15,6 +15,9 @@ The UI is built around Turbo Brilliance — 27 reasoning constructs, matching in
 - Session history, regen, stop, syntax-highlighted code with copy/save
 - **Disk memory**: older turns move to a chunk file off the window and stand in as one exact register line; a turn recalls what it needs, you can pull any chunk back by hand (`/recall 3`), and the model can ask for one itself
 - **Web search the model drives itself**: `web_search` / `web_fetch` tools, capped and sourced, keyless by default
+- **Skills**: procedure manuals (K-Dense's scientific-agent-skills) the model loads on demand
+- **Library**: PDFs and long documents read once, chunked by section, searched by keyword and meaning, optionally OCR'd
+- **Tools that actually run**: a briefing tells the model which tools it has, results go back as proper tool messages, and calls a fine-tune writes as text (or inside its thinking) are still executed — every multi-round turn carries a **turn trace**
 - **Context folding**: the fallback when the store is out of reach, one handoff brief instead of the old turns
 - **Reply continuation**: a reply cut off by `max_tokens` resumes itself, mid-code-block included
 - **Job console**: a punched-card readout for the slow parts — model loading, prompt reading, and weights paging back in after idle
@@ -38,7 +41,7 @@ llama-server \
   --spec-type draft-mtp --spec-draft-n-max 3
 ```
 
-for smaller cards, using the turboquant fork, you can fit this in 6GB of VRAM and 32GB of RAM, but expect
+For smaller cards, using the turboquant fork (its `turbo4`/`turbo3` KV-cache types are not in mainline llama.cpp), you can fit this in 6GB of VRAM and 32GB of RAM, but expect
 very slow response times.
 
 ```bash
@@ -65,12 +68,14 @@ If your llama.cpp is older and rejects `--spec-type`, drop that flag. The GGUF s
 
 ### Tools on the server side
 
-The workbench's tools — the archive `recall`, and `web_search` / `web_fetch` — are **client-side**: the workbench sends an OpenAI `tools` array, the model asks for one, and the workbench does the work. llama-server only has to parse the model's tool call, and that is what `--jinja` is for:
+The workbench's tools — the archive `recall`, `web_search` / `web_fetch`, `skill_load` / `skill_search`, and `doc_add` / `doc_search` / `doc_read` — are **client-side**: the workbench sends an OpenAI `tools` array, the model asks for one, and the workbench does the work. llama-server only has to parse the model's tool call, and that is what `--jinja` is for:
 
 - **`--jinja`** — use the chat template inside the GGUF, which is what knows the model's tool-call delimiters. It is in the launch line above. Recent builds default it on (`--no-jinja` turns it off); older ones need it spelled out. Without it, llama-server ignores the `tools` array and the model describes the call in prose instead of making one.
-- **A tool-aware template is required, not just the flag.** Check `http://127.0.0.1:8080/props` — the model should report `chat_template_tool_use`. If a model's template has no tool support (some quants ship without it), point `--chat-template-file` at one that does, or fall back to `--chat-template chatml`.
+- **A tool-aware template is required, not just the flag.** Check `http://127.0.0.1:8080/props` — the model should report `chat_template_tool_use`; the **Server** tab warns when the loaded template never mentions tools, and lists the tools sent on the last turn. Keep the template that ships in the Turbo-Brilliance GGUF: it is heavily customised (it is what implements the `{REASON:…}` constructs), so swapping in the stock Qwen 3.8 template or `chatml` loses the constructs. Its tool support is Qwen's `<tool_call><function=…>` form.
 - **`--tools` / `--agent` are a different thing and you do not want them here.** Those enable *llama-server's own* built-in tools (`read_file`, `write_file`, `grep_search`, `exec_shell_command`, …) for its web UI. They are not needed for the workbench's tools, they expose file and shell access over the API, and llama.cpp's own README says not to enable them in an untrusted environment.
-- `parallel_tool_calls` (in the request) is off by default and only supported by some templates; the workbench asks for one call at a time, which every tool-aware model handles.
+- The workbench does not ask for `parallel_tool_calls`; if a round still carries several calls, they are run one after another.
+
+**How a tool turn goes over the wire.** Everything the workbench adds — system prompt, tool briefing, memory register, skills — is merged into **one** leading system message, because Qwen-family templates refuse a second one (`System message must be at the beginning`). After a round that called tools, the next request carries the assistant message with its `tool_calls` *and its `reasoning_content`* (the template renders it back inside `<think>`, so the model sees what it was planning), then one `role: "tool"` message per call. If the model writes the call as plain text instead of a structured call — this fine-tune often writes Qwen's XML form in its reply, or at the very end of its thinking — the workbench parses it, maps guessed parameter names (`doc_id` → `doc`, `q` → `query`, …) onto the declared ones, runs it, and hides the markup from the reply. A round after the results that says nothing gets one nudge; a turn that keeps calling tools is stopped at 6 round trips and given a final round without tools, so it always answers. Each tool has its own per-turn cap (below); a call over its cap is answered "not run" rather than ignored. When a turn took more than one round, the reply carries a collapsible **turn trace**: each round's finish reason, the calls it made (and whether they were written as text), text and thinking sizes, tokens, and any nudge.
 
 ## Run the workbench
 
@@ -93,6 +98,8 @@ Vite binds `0.0.0.0:5173`. Long generations (slow GPU, big `xhigh` traces) are s
 | `/api/memory/list` `/chunk` `/put` `/forget` | the disk store behind memory (below) |
 | `/api/web/search` | a web search through the configured provider |
 | `/api/web/fetch` | open one public page and return its text |
+| `/api/skills/index` `/search` `/read` | the skills folder (below) |
+| `/api/library/list` `/add` `/upload` `/search` `/read` `/remove` `/embed` `/jobs` `/reocr` `/ocr` | the document library (below) |
 
 Point **Setup → llama-server URL** at your server (default `http://127.0.0.1:8080`). The proxy reads `X-Llama-Upstream` per request.
 
@@ -127,7 +134,7 @@ Then open the URL it prints — not the old `serve` port.
 ## Web search
 
 The model can look things up while it answers. Two tools, offered on every turn while
-**search the web** is on in Setup:
+*let the model search the web and read pages* is on (Setup or the Server tab):
 
 | Tool | What it does |
 | --- | --- |
@@ -136,7 +143,8 @@ The model can look things up while it answers. Two tools, offered on every turn 
 
 A turn that asks for a search gets its results back in the prompt and keeps generating;
 if a snippet is not enough the model can open the page and read it. Both are capped —
-4 searches, 4 page reads, 6 round trips per turn — and both are visible.
+4 searches and 4 page reads per turn, inside the turn's 6 round trips — and both are visible.
+A PDF link is refused with a pointer to `doc_add`, which puts it in the library instead.
 
 **While it is out**, a strip above the composer says what is happening — *searching the
 web for "retry timeout helpers" · waiting on the network* — and the job console tape
@@ -201,6 +209,8 @@ API key. `skills/` is git-ignored; the sync writes `skills/.source.json` with th
 upstream commit, and a re-sync removes only the skills it installed, never your own
 folders.
 
+Turn them on in the Server tab (*let the model consult skills*).
+
 **How the model sees them.** Up to 40 skills are listed inside a single `skill_load`
 tool — one line each, names as an enum — about 1k tokens for the curated set. Past 40
 the list would cost too much, so the model gets `skill_search` instead and finds names
@@ -228,8 +238,10 @@ doc_search(query, doc?)           the passages that best answer it, with section
 doc_read(doc, section? | chunk?)  the outline, a whole section ("8.3", "Continuum Memory"), or read on
 ```
 
-The model gets all three while the library is on (Library tab), with the documents it holds
-listed in `doc_search`. A typical turn: *"what does the Nested Learning paper say about CMS?"*
+The model gets all three while the library is on (the switch in the Library tab), with the
+documents it holds listed in `doc_search` (the 30 most recent, when there are more). A turn may
+add 2 documents, run 4 searches and make 4 reads; a read returns up to 12k characters
+(Setup → *characters per document read*). A typical turn: *"what does the Nested Learning paper say about CMS?"*
 → `doc_add("https://arxiv.org/abs/2512.24695")` → `doc_search("continuum memory system update
 frequency")` → an answer quoting §7.1, p. 27. arXiv abstract links and OpenReview forums are
 fetched as their PDFs. Replies carry a `doc · <title>` badge and list the paper as a source.
@@ -249,8 +261,8 @@ Limits: 50 MB per document; from the text layer, **equations and tables come thr
 garbled** — the prose and structure are faithful, the maths is not. Scans and maths-heavy
 papers are what OCR (below) is for.
 
-**OCR (scans, and papers whose maths matters).** Point Setup → *OCR server* (or
-`Q38_OCR_URL`) at an OpenAI-compatible vision endpoint serving an OCR model. Each page is
+**OCR (scans, and papers whose maths matters).** Point Setup → *Library & skills* →
+*OCR server* (or `Q38_OCR_URL`) at an OpenAI-compatible vision endpoint serving an OCR model. Each page is
 rendered by pdf.js and sent as an image with an instruction; how depends on the **OCR
 profile**, which by default is picked from the model name the server reports:
 
@@ -259,6 +271,9 @@ profile**, which by default is picked from the model name the server reports:
 | **OvisOCR2** | its own whole-page instruction (verbatim from the model card) | ~4 MP (up to 2880²) | 16k tokens, LaTeX formulas, HTML tables | thinking off; figure placeholders dropped; best formula scores of the small models, and it reads whole pages end to end — the way Q38 sends them |
 | **PaddleOCR-VL** | `OCR:` | ~1 MP (its ceiling) | 4k tokens | strong on text in many languages; its formula strength needs Paddle's own layout pipeline, which Q38 does not run |
 | **Custom** | yours | yours | yours | for any other model |
+
+Setup → *OCR profile* picks one by hand (*auto* is the default); *Custom* adds a prompt, a
+token budget and a page size in megapixels, where 0 keeps the default.
 
 ```bash
 vllm serve ATH-MaaS/OvisOCR2                                   # or:
@@ -282,7 +297,7 @@ strip show *OCR page 12/52* while it runs. A page that fails twice is skipped an
 the note; more than a quarter failing fails the read and leaves the document as it was.
 The environment can set the same things for a headless start: `Q38_OCR_PROFILE`
 (`auto`, `ovisocr2`, `paddleocr-vl`, `custom`), `Q38_OCR_PROMPT`, `Q38_OCR_MAX_TOKENS`,
-`Q38_OCR_PIXELS`, `Q38_OCR_MODEL`. The OCR server may be on your own network — it is a
+`Q38_OCR_PIXELS`, `Q38_OCR_MODEL`, and `Q38_OCR_API_KEY` if the server wants a bearer token. The OCR server may be on your own network — it is a
 configured endpoint, like llama-server, not something the model chose to fetch. Page
 rendering uses `@napi-rs/canvas`, which pdf.js installs with it.
 
@@ -295,7 +310,8 @@ rankings fused by reciprocal rank:
 llama-server -m Qwen3-Embedding-0.6B-Q8_0.gguf --embedding --pooling last -ub 2048 -b 2048 --port 8081
 ```
 
-Then Setup → *embeddings server* = `http://127.0.0.1:8081` (or `Q38_EMBED_URL`). New
+Then Setup → *Library & skills* → *embeddings server* = `http://127.0.0.1:8081` (or
+`Q38_EMBED_URL`, with `Q38_EMBED_API_KEY` if it needs a token). New
 documents are embedded on add; the Library tab offers to embed those added before. Query
 framing is picked from the model's id (Qwen3-Embedding's instruction, nomic's
 `search_query:`, e5's `query:`, bge's). If the server is down, search says so and falls back
@@ -310,7 +326,7 @@ or `Q38_LIBRARY_DIR`: `docs/<id>/` holds the original file, `chunks.json`, `meta
 
 ```bash
 npm test             # everything
-npm run test:unit    # pure logic: memory rules, web, skill and library tool text  (no DOM, no network)
+npm run test:unit    # pure logic: memory rules, web, skill and library tool text, the tool briefing, text tool calls  (no DOM, no network)
 npm run test:server  # the web, skill and library routes over real HTTP against stubs and fixtures
 npm run test:ui      # the whole workbench in jsdom, against a stub model
 ```
@@ -329,8 +345,14 @@ npm run test:ui      # the whole workbench in jsdom, against a stub model
 - `tests/skills-routes.mjs` — frontmatter parsing, indexing a fixture folder,
   search ranking, reading reference files, refusing paths out of a skill and binary
   files, typo suggestions, and the three routes over HTTP.
-- `tests/library.test.ts` — the library tools on offer and the text an add, a search, a
-  section read and each kind of miss turn into.
+- `tests/library.test.ts` — the library tools on offer (and `ocr=true` only with an OCR
+  server) and the text an add, a search, a section read and each kind of miss turn into.
+- `tests/toolbrief.test.ts` — the briefing at the top of the system message: written only
+  from the tools actually offered, and never promising one that is not there.
+- `tests/textcalls.test.ts` — tool calls written as text: Qwen's XML form and the Hermes
+  JSON form read back into calls, guessed parameter names mapped to declared ones, values
+  coerced, calls inside code fences left alone, markup stripped from the reply, and calls
+  at the very end of the thinking accepted while mid-thought ones are not.
 - `tests/library-routes.mjs` — PDF extraction on generated PDFs (`tests/pdf-fixture.mjs`):
   the outline, running heads, hyphens, maths that is not a heading; chunking; BM25 search,
   section reads by the paper's own numbers, budgets and continuation; dedupe, the inbox,
@@ -347,9 +369,11 @@ npm run test:ui      # the whole workbench in jsdom, against a stub model
   unrelated one does not, the model's `recall` tool round-trips, `/recall 3` pins a
   chunk, the model searches and then opens a page and the reply carries its sources, a
   private address is refused on demand, the model loads a skill and it comes back in
-  the one system message, the model adds a paper, searches it and the reply cites it, a model that never stops calling tools is cut off and still
-  answers, unarchive brings every message back, and a
-  store that refuses falls back to folding.
+  the one system message, the model adds a paper, searches it and the reply cites it, a
+  call written as text in the reply or inside the thinking is still run, a silent round
+  after the results gets one nudge, a model that never stops calling tools is cut off and
+  still answers, unarchive brings every message back, and a store that refuses falls back
+  to folding.
 
 Scratch output lands in `tests/.bundle` and `tests/.tmp`, both ignored.
 
@@ -381,7 +405,8 @@ always come back word for word. It comes back three ways:
   terms (paths, symbols, quoted strings, words) and the closest one or two are
   read back verbatim. A path, a symbol or a number is evidence on its own; one
   ordinary word is not. The decision is made once per send, so the prompt prefix
-  stays stable and llama-server's prompt cache survives the turn.
+  stays stable within the turn (which is what lets llama-server's prompt cache help,
+  if you turn it back on in the Sample tab).
 - **By hand.** The memory card in the transcript and the **Memory** panel in the
   Context tab list every chunk with **pull back** (it stays in the window until
   you **let go**), **forget** (delete it from the disk) and **unarchive
@@ -408,8 +433,7 @@ under `%APPDATA%\q38` on Windows, `$XDG_DATA_HOME/q38` (else
 loses nothing that is not still in the transcript.
 
 **Continuation.** When a round stops on `finish_reason: "length"` the reply resumes
-itself, up to **continue rounds** times (default 2, 0 = manual only). Any reply has a
-A reply that *stopped short* — `finish_reason: "length"`, or text that ends inside an open
+itself, up to **continue rounds** times (default 2, 0 = manual only). A reply that *stopped short* — `finish_reason: "length"`, or text that ends inside an open
 code block — is offered **continue this reply** / **finish the code block** directly under
 it, and only then: a reply that finished cleanly gets no resume button at all. The cut-off
 text is sent back as a trailing assistant message
@@ -501,5 +525,5 @@ Slash commands: `/recall 3` reads chunk #3 back off the disk and keeps it in the
 window (same as **pull back** on the memory card); with no number it lists what is
 on disk.
 
-Buttons: **fold** in the stage head, **compact/fold now** + **measure exact** in the
-Context tab, **continue** under any reply and in the composer bar.
+Buttons: **fold** in the stage head, **fold now** + **measure exact** in the
+Context tab, **continue** under a reply that stopped short and in the composer bar.
