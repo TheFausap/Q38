@@ -24,6 +24,7 @@
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { writeDurable } from "./durable.mjs";
 import path from "node:path";
 import { ocrPdf } from "./ocr.mjs";
 
@@ -704,9 +705,9 @@ export function createLibrary({ root, download, htmlToText, titleOf }) {
     const dim = vectors[0]?.length ?? 0;
     const flat = new Float32Array(dim * vectors.length);
     vectors.forEach((v, i) => flat.set(v, i * dim));
-    fs.writeFileSync(path.join(dir, "vectors.f32"), Buffer.from(flat.buffer));
+    writeDurable(path.join(dir, "vectors.f32"), Buffer.from(flat.buffer));
     meta.embed = { model, dim };
-    fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify(meta, null, 2));
+    writeDurable(path.join(dir, "meta.json"), JSON.stringify(meta, null, 2));
     return { model, dim };
   }
 
@@ -792,9 +793,9 @@ export function createLibrary({ root, download, htmlToText, titleOf }) {
       ocrFailedPages: extracted.ocr?.failed?.length ? extracted.ocr.failed : undefined,
     };
     const ext = kind === "pdf" ? ".pdf" : kind === "html" ? ".html" : kind === "md" ? ".md" : ".txt";
-    fs.writeFileSync(path.join(dir, `source${ext}`), bytes);
-    fs.writeFileSync(path.join(dir, "chunks.json"), JSON.stringify(chunks));
-    fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify(meta, null, 2));
+    writeDurable(path.join(dir, `source${ext}`), bytes);
+    writeDurable(path.join(dir, "chunks.json"), JSON.stringify(chunks));
+    writeDurable(path.join(dir, "meta.json"), JSON.stringify(meta, null, 2));
 
     let embedNote = "";
     if (embedder) {
@@ -878,8 +879,8 @@ export function createLibrary({ root, download, htmlToText, titleOf }) {
           embed: null,
         };
         fs.rmSync(path.join(dir, "vectors.f32"), { force: true });
-        fs.writeFileSync(path.join(dir, "chunks.json"), JSON.stringify(chunks));
-        fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify(meta, null, 2));
+        writeDurable(path.join(dir, "chunks.json"), JSON.stringify(chunks));
+        writeDurable(path.join(dir, "meta.json"), JSON.stringify(meta, null, 2));
         let note = x.ocr.failed.length
           ? `OCR could not read page${x.ocr.failed.length === 1 ? "" : "s"} ${x.ocr.failed.join(", ")}`
           : "";
@@ -918,7 +919,7 @@ export function createLibrary({ root, download, htmlToText, titleOf }) {
           } else {
             fs.mkdirSync(path.join(inboxDir, "failed"), { recursive: true });
             fs.renameSync(full, path.join(inboxDir, "failed", n));
-            fs.writeFileSync(path.join(inboxDir, "failed", `${n}.error.txt`), out.error + "\n");
+            writeDurable(path.join(inboxDir, "failed", `${n}.error.txt`), out.error + "\n");
             failed.push({ name: n, error: out.error });
           }
         }

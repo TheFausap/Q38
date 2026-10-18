@@ -804,6 +804,24 @@ try {
   );
   check((stored().compactions ?? []).length === 1, "the fold is recorded, so it can be undone");
 
+  /* ------------------------------------------------- on the server's disk */
+  const uiDoc = (name) => {
+    const file = `${STATE}/ui/${name}`;
+    return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : null;
+  };
+  const settled = await waitFor("the finished conversation on disk", () => {
+    const env = uiDoc("sessions/sess-mem-1.json");
+    const mine = stored();
+    if (!env || env.data.messages.length !== mine.messages.length) return null;
+    const a = env.data.messages.at(-1);
+    const b = mine.messages.at(-1);
+    return a.id === b.id && a.content === b.content ? env : null;
+  }, 8000);
+  check(!!settled, "the finished conversation is on the server's disk, last reply included");
+  check(uiDoc("settings.json")?.data?.llamaUrl === `http://127.0.0.1:${STUB_PORT}`, "the browser's settings were imported to the server");
+  check(uiDoc("index.json")?.data?.order?.includes("sess-mem-1"), "and so is the chat list");
+  check(/saved/.test(allText()), "the header says it is saved");
+
   console.log(results.join("\n"));
   console.log(`ui checks passed (${results.length})`);
 } catch (err) {

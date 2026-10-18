@@ -9,9 +9,13 @@ import "@fontsource/ibm-plex-mono/500.css";
 import "katex/dist/katex.min.css";
 import "./styles.css";
 import { App } from "./App";
+import { hydrate } from "./lib/storage";
 
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
+/* conversations and settings come from the server before the first render */
+hydrate().finally(() =>
+  createRoot(document.getElementById("root")!).render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  ),
 );

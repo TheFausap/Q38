@@ -128,10 +128,15 @@ import {
   loadSampling,
   loadSessions,
   loadSettings,
+  flushNow,
+  getSaveStatus,
+  keepThisTab,
+  onSaveStatus,
   saveActiveId,
   saveSampling,
   saveSessions,
   saveSettings,
+  type SaveStatus,
   uid,
 } from "./lib/storage";
 import type {
@@ -434,9 +439,16 @@ export function App() {
     return sessionsRef.current.find((s) => s.id === activeId) ?? sessionsRef.current[0];
   }, [activeId]);
 
+  /* every change is queued for the server's disk; the moment a reply ends it
+     is pushed at once, so a finished answer is never waiting on a timer */
+  const wasStreaming = useRef(false);
   useEffect(() => {
     saveSessions(sessions);
-  }, [sessions]);
+    if (wasStreaming.current && !streamingId) void flushNow();
+    wasStreaming.current = streamingId !== null;
+  }, [sessions, streamingId]);
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>(() => getSaveStatus());
+  useEffect(() => onSaveStatus(setSaveStatus), []);
   useEffect(() => {
     if (session) saveActiveId(session.id);
   }, [session]);
@@ -2468,6 +2480,7 @@ export function App() {
         {pacingView && pacingView.phase !== "idle" && (
           <JobPip phase={pacingView.phase} elapsedMs={pacingView.elapsedMs} />
         )}
+        <SavePill status={saveStatus} />
         <StatusPill status={status} />
         <button type="button" className="icon-btn" onClick={() => newSession()}>
           new chat
@@ -2479,6 +2492,28 @@ export function App() {
           construct
         </button>
       </header>
+
+      {(saveStatus.kind === "local" || saveStatus.kind === "error") && (
+        <div className="banner warn">
+          <span>{saveStatus.message}</span>
+          {saveStatus.kind === "error" && (
+            <button type="button" className="icon-btn" onClick={() => void flushNow()}>
+              retry now
+            </button>
+          )}
+        </div>
+      )}
+      {saveStatus.kind === "conflict" && (
+        <div className="banner warn">
+          <span>{saveStatus.message}</span>
+          <button type="button" className="icon-btn" onClick={() => window.location.reload()}>
+            reload
+          </button>
+          <button type="button" className="icon-btn" onClick={() => void keepThisTab()}>
+            keep this tab
+          </button>
+        </div>
+      )}
 
       {status?.via === "direct" && (
         <div className="banner warn">
@@ -2704,6 +2739,24 @@ export function App() {
           onPing={() => void refreshStatus()}
         />
       )}
+    </div>
+  );
+}
+
+/** Whether the conversations and settings are on the server's disk yet. */
+function SavePill({ status }: { status: SaveStatus }) {
+  const [cls, label, title] =
+    status.kind === "saved"
+      ? ["ok", "saved", `on disk · ${new Date(status.at).toLocaleTimeString()}`]
+      : status.kind === "saving"
+        ? ["warm", "saving", "writing to disk"]
+        : status.kind === "local"
+          ? ["down", "browser only", status.message]
+          : ["down", "not saved", status.message];
+  return (
+    <div className={`status ${cls}`} title={title}>
+      <i />
+      {label}
     </div>
   );
 }

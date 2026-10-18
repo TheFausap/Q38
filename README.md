@@ -131,6 +131,29 @@ npm start
 
 Then open the URL it prints — not the old `serve` port.
 
+### Where your chats and settings live
+
+On the **server's disk**, not in the browser: `<state>/ui` (`~/.local/share/q38/ui`,
+`%APPDATA%\q38\ui`, or `$Q38_STATE_DIR/ui`) — `settings.json`, `sampling.json`,
+`index.json` (chat order, active chat) and one `sessions/<id>.json` per conversation.
+
+Every write is power-cut safe: written to a temp file, fsynced, renamed over the old
+file, and the directory fsynced. A file is always either the old complete version or
+the new one. Saves go out at most every ~1 s while you type or a reply streams, and
+**the moment a reply ends** it is pushed and fsynced at once; the header pill reads
+**saved** once the server confirms it. Leaving or hiding the tab flushes too, and
+closing with something unsaved asks first.
+
+`localStorage` is only a mirror now: what the app opens from when the server can't
+be reached (a **browser only** banner says so), and, the first time a server's store
+is empty, what gets imported into it. Two tabs on the same chat can't silently erase
+each other: the stale one gets a banner with **reload** / **keep this tab**.
+
+Files are created `0600` (settings hold API keys). An unreadable file is set aside as
+`*.corrupt-<time>` rather than deleted. On macOS, fsync flushes to the drive but not
+through the drive's own cache (that needs `F_FULLFSYNC`, which Node does not expose);
+on Linux it reaches stable storage.
+
 ## Web search
 
 The model can look things up while it answers. Two tools, offered on every turn while
@@ -327,10 +350,16 @@ or `Q38_LIBRARY_DIR`: `docs/<id>/` holds the original file, `chunks.json`, `meta
 ```bash
 npm test             # everything
 npm run test:unit    # pure logic: memory rules, web, skill and library tool text, the tool briefing, text tool calls, markdown  (no DOM, no network)
-npm run test:server  # the web, skill and library routes over real HTTP against stubs and fixtures
+npm run test:server  # the store, web, skill and library routes over real HTTP against stubs and fixtures
 npm run test:ui      # the whole workbench in jsdom, against a stub model
 ```
 
+- `tests/store-routes.mjs` — the state store on disk: durable writes leave no temp
+  files, revisions, a late same-tab write never overwrites a newer reply, a stale tab
+  gets a conflict, deletes, path safety, corrupt and torn files.
+- `tests/storage.test.ts` — the client half: import from the browser on first run, a
+  finished reply flushed at once, and after a simulated power cut the page reloads the
+  latest chat and settings from the server, not the browser's stale copy.
 - `tests/memory.test.ts` — which tokens count as terms (and that the injected
   `{REASON:coder}` tag never does), what a register line says, when a turn has earned
   a recall.

@@ -7,6 +7,8 @@ import path from "node:path";
 import { createEmbedder, createLibrary, LIBRARY_MAX_BYTES } from "./library.mjs";
 import { createOcr } from "./ocr.mjs";
 import { currentIndex, publicIndex, readSkill, searchSkills } from "./skills.mjs";
+import { writeDurable, writeJsonDurable } from "./durable.mjs";
+import { loadAll, saveDocs } from "./store.mjs";
 
 const SKIP_DIRS = new Set([
   "node_modules",
@@ -623,9 +625,7 @@ function writeChunks(id, chunks) {
   const dir = sessionDir(id);
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, "chunks.ndjson");
-  const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, chunks.map((c) => JSON.stringify(c)).join("\n") + (chunks.length ? "\n" : ""));
-  fs.renameSync(tmp, file);
+  writeDurable(file, chunks.map((c) => JSON.stringify(c)).join("\n") + (chunks.length ? "\n" : ""));
   return file;
 }
 
@@ -643,7 +643,7 @@ function writeMeta(id, patch) {
   const dir = sessionDir(id);
   fs.mkdirSync(dir, { recursive: true });
   const next = { ...(readMeta(id) || {}), ...patch, id: String(id), at: Date.now(), schema: 1 };
-  fs.writeFileSync(path.join(dir, "meta.json"), JSON.stringify(next, null, 2));
+  writeJsonDurable(path.join(dir, "meta.json"), next, true);
   return next;
 }
 
@@ -655,6 +655,9 @@ function refOf(chunk) {
 
 /** Largest chunk the memory store accepts, to keep a runaway turn off the disk. */
 const MEMORY_MAX_BYTES = 4 * 1024 * 1024;
+
+/** Largest batch of conversations one save may carry. */
+const STORE_MAX_BYTES = 64 * 1024 * 1024;
 
 /** Longest drop the workbench will write into ./workspace. */
 const UPLOAD_MAX_BYTES = 8 * 1024 * 1024;
@@ -1291,6 +1294,25 @@ export function createApi() {
         return;
       }
 
+      if (url.pathname === "/api/store" && req.method === "GET") {
+        sendJson(res, 200, { ok: true, ...loadAll(stateRoot()) });
+        return;
+      }
+
+      if (url.pathname === "/api/store/save" && req.method === "POST") {
+        let payload;
+        try {
+          /* sendBeacon posts text/plain, so read the body whatever its type */
+          payload = JSON.parse((await readBodyCapped(req, STORE_MAX_BYTES)).toString("utf8") || "{}");
+        } catch (err) {
+          sendJson(res, err?.statusCode || 400, { ok: false, error: err instanceof Error ? err.message : String(err) });
+          return;
+        }
+        const results = saveDocs(stateRoot(), payload?.tab, payload?.docs);
+        sendJson(res, results.some((r) => r.conflict) ? 409 : 200, { ok: true, results });
+        return;
+      }
+
       if (url.pathname === "/api/workspace/tree" && req.method === "GET") {
         const root = workspaceRoot();
         const children = [];
@@ -1360,7 +1382,7 @@ export function createApi() {
         const root = workspaceRoot();
         fs.mkdirSync(root, { recursive: true });
         const unique = uniqueName(root, name);
-        fs.writeFileSync(path.join(root, unique.name), payload.content, "utf8");
+        writeDurable(path.join(root, unique.name), payload.content);
         sendJson(res, 200, { path: unique.name, size: bytes, renamed: unique.renamed });
         return;
       }
