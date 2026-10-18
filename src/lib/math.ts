@@ -27,6 +27,21 @@ export function splitMath(src: string): MathPiece[] {
 
 function findMath(src: string, from: number): Hit | null {
   for (let j = from; j < src.length; j++) {
+    /* an inline code span is code, not maths: `$HOME`, `a $ b` stay as written */
+    if (src[j] === "`") {
+      let n = 1;
+      while (src[j + n] === "`") n++;
+      const ticks = "`".repeat(n);
+      let k = src.indexOf(ticks, j + n);
+      while (k !== -1 && src[k + n] === "`") k = src.indexOf(ticks, k + n + 1);
+      const para = src.indexOf("\n\n", j);
+      if (k !== -1 && (para === -1 || k < para)) {
+        j = k + n - 1;
+        continue;
+      }
+      j += n - 1;
+      continue;
+    }
     if (src.startsWith("$$", j)) {
       const close = src.indexOf("$$", j + 2);
       if (close === -1) {

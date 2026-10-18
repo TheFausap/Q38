@@ -374,6 +374,16 @@ export type WireMessage = {
   tool_call_id?: string;
 };
 
+/**
+ * How replies are displayed, said once at the top of every prompt. Without it
+ * a coder persona puts formulas in backticks — and a formula quoted from a
+ * document comes out as flattened Unicode in a code span instead of maths.
+ */
+export const RENDERING_NOTE =
+  "Replies are rendered as Markdown with KaTeX. Write mathematics as LaTeX — $...$ inline, $$...$$ on its own lines for display — " +
+  "never in backticks or as Unicode look-alikes (σ̃, ᵀ, ∈ typed as text). When you quote a formula from a document, transcribe it " +
+  "into LaTeX faithfully, symbol for symbol. Backticks are for code, identifiers and file names only.";
+
 export function buildWireMessages(
   messages: ChatMessage[],
   settings: Settings,
@@ -383,7 +393,7 @@ export function buildWireMessages(
   /* Qwen-family chat templates accept exactly one system message, and only at
      index 0 — a second one raises "System message must be at the beginning".
      So the prompt, briefs, recalls and tool results are joined into one. */
-  const systemParts = [settings.systemPrompt, ...(opts.systemExtra ?? [])]
+  const systemParts = [settings.systemPrompt, RENDERING_NOTE, ...(opts.systemExtra ?? [])]
     .map((s) => s.trim())
     .filter(Boolean);
   if (systemParts.length) {

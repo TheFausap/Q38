@@ -21,7 +21,7 @@ The UI is built around Turbo Brilliance — 27 reasoning constructs, matching in
 - **Context folding**: the fallback when the store is out of reach, one handoff brief instead of the old turns
 - **Reply continuation**: a reply cut off by `max_tokens` resumes itself, mid-code-block included
 - **Job console**: a punched-card readout for the slow parts — model loading, prompt reading, and weights paging back in after idle
-- KaTeX for LaTeX: `$$...$$`, `$...$`, `\[...\]`, `\(...\)`, and `align`/`equation` environments
+- KaTeX for LaTeX: `$$...$$`, `$...$`, `\[...\]`, `\(...\)`, and `align`/`equation` environments — the model is told so in every prompt, and asked to write formulas (including ones quoted from a document) as LaTeX rather than Unicode in backticks; code spans are never formatted or read as maths
 - Same-origin proxy so the browser never talks to `localhost` and CORS is not your problem
 - Offline demo stream if llama-server is down, so the workbench still exercises
 
@@ -75,7 +75,7 @@ The workbench's tools — the archive `recall`, `web_search` / `web_fetch`, `ski
 - **`--tools` / `--agent` are a different thing and you do not want them here.** Those enable *llama-server's own* built-in tools (`read_file`, `write_file`, `grep_search`, `exec_shell_command`, …) for its web UI. They are not needed for the workbench's tools, they expose file and shell access over the API, and llama.cpp's own README says not to enable them in an untrusted environment.
 - The workbench does not ask for `parallel_tool_calls`; if a round still carries several calls, they are run one after another.
 
-**How a tool turn goes over the wire.** Everything the workbench adds — system prompt, tool briefing, memory register, skills — is merged into **one** leading system message, because Qwen-family templates refuse a second one (`System message must be at the beginning`). After a round that called tools, the next request carries the assistant message with its `tool_calls` *and its `reasoning_content`* (the template renders it back inside `<think>`, so the model sees what it was planning), then one `role: "tool"` message per call. If the model writes the call as plain text instead of a structured call — this fine-tune often writes Qwen's XML form in its reply, or at the very end of its thinking — the workbench parses it, maps guessed parameter names (`doc_id` → `doc`, `q` → `query`, …) onto the declared ones, runs it, and hides the markup from the reply. A round after the results that says nothing gets one nudge; a turn that keeps calling tools is stopped at 6 round trips and given a final round without tools, so it always answers. Each tool has its own per-turn cap (below); a call over its cap is answered "not run" rather than ignored. When a turn took more than one round, the reply carries a collapsible **turn trace**: each round's finish reason, the calls it made (and whether they were written as text), text and thinking sizes, tokens, and any nudge.
+**How a tool turn goes over the wire.** Everything the workbench adds — system prompt, a one-line note on how replies are rendered, tool briefing, memory register, skills — is merged into **one** leading system message, because Qwen-family templates refuse a second one (`System message must be at the beginning`). After a round that called tools, the next request carries the assistant message with its `tool_calls` *and its `reasoning_content`* (the template renders it back inside `<think>`, so the model sees what it was planning), then one `role: "tool"` message per call. If the model writes the call as plain text instead of a structured call — this fine-tune often writes Qwen's XML form in its reply, or at the very end of its thinking — the workbench parses it, maps guessed parameter names (`doc_id` → `doc`, `q` → `query`, …) onto the declared ones, runs it, and hides the markup from the reply. A round after the results that says nothing gets one nudge; a turn that keeps calling tools is stopped at 6 round trips and given a final round without tools, so it always answers. Each tool has its own per-turn cap (below); a call over its cap is answered "not run" rather than ignored. When a turn took more than one round, the reply carries a collapsible **turn trace**: each round's finish reason, the calls it made (and whether they were written as text), text and thinking sizes, tokens, and any nudge.
 
 ## Run the workbench
 
@@ -326,7 +326,7 @@ or `Q38_LIBRARY_DIR`: `docs/<id>/` holds the original file, `chunks.json`, `meta
 
 ```bash
 npm test             # everything
-npm run test:unit    # pure logic: memory rules, web, skill and library tool text, the tool briefing, text tool calls  (no DOM, no network)
+npm run test:unit    # pure logic: memory rules, web, skill and library tool text, the tool briefing, text tool calls, markdown  (no DOM, no network)
 npm run test:server  # the web, skill and library routes over real HTTP against stubs and fixtures
 npm run test:ui      # the whole workbench in jsdom, against a stub model
 ```
@@ -353,6 +353,9 @@ npm run test:ui      # the whole workbench in jsdom, against a stub model
   JSON form read back into calls, guessed parameter names mapped to declared ones, values
   coerced, calls inside code fences left alone, markup stripped from the reply, and calls
   at the very end of the thinking accepted while mid-thought ones are not.
+- `tests/markdown.test.ts` — inline markdown: nothing inside a code span is formatted (an
+  asterisk in `` `M*` `` cannot italicise the rest of the line), escaping, links, spaced
+  asterisks as multiplication; and maths is found outside code spans only.
 - `tests/library-routes.mjs` — PDF extraction on generated PDFs (`tests/pdf-fixture.mjs`):
   the outline, running heads, hyphens, maths that is not a heading; chunking; BM25 search,
   section reads by the paper's own numbers, budgets and continuation; dedupe, the inbox,

@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { extForLang } from "../lib/api";
 import { escapeHtml, highlight } from "../lib/highlight";
+import { inline } from "../lib/markdown";
 import { renderKatex, splitMath } from "../lib/math";
 
 type Block =
@@ -37,18 +38,6 @@ function splitBlocks(src: string): Block[] {
     if (src[i] === "\n") i += 1;
   }
   return blocks;
-}
-
-function inline(text: string): string {
-  let s = escapeHtml(text);
-  s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
-  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  s = s.replace(/(^|[^\*])\*([^*]+)\*(?!\*)/g, "$1<em>$2</em>");
-  s = s.replace(
-    /\[([^\]]+)\]\((https?:[^)]+)\)/g,
-    '<a href="$2" target="_blank" rel="noreferrer">$1</a>',
-  );
-  return s;
 }
 
 function renderText(text: string): string {
