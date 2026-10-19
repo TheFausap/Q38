@@ -74,6 +74,8 @@ export function Sidebar({
   onPreviewFile,
   onFiles,
   treeError,
+  github,
+  onGithubSave,
 }: {
   sessions: Session[];
   activeId: string;
@@ -88,10 +90,16 @@ export function Sidebar({
   onFiles: (files: FileList | File[]) => void;
   /** why the tree could not be read, when it could not be */
   treeError?: string | null;
+  /** set when the server's gh is logged in: the "from GitHub" box shows */
+  github?: { login: string } | null;
+  /** save one GitHub file into the workspace and pin it; resolves true on success */
+  onGithubSave?: (target: string) => Promise<boolean>;
 }) {
   const [q, setQ] = useState("");
   const [over, setOver] = useState(false);
   const pickRef = useRef<HTMLInputElement>(null);
+  const [ghTarget, setGhTarget] = useState("");
+  const [ghBusy, setGhBusy] = useState(false);
   const attached = useMemo(() => new Set(attachments.map((a) => a.path)), [attachments]);
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase();
@@ -174,6 +182,34 @@ export function Sidebar({
             }}
           />
         </div>
+        {github && onGithubSave && (
+          <form
+            className="gh-add"
+            title={`through gh, as ${github.login}`}
+            onSubmit={async (e) => {
+              e.preventDefault();
+              const t = ghTarget.trim();
+              if (!t || ghBusy) return;
+              setGhBusy(true);
+              try {
+                if (await onGithubSave(t)) setGhTarget("");
+              } finally {
+                setGhBusy(false);
+              }
+            }}
+          >
+            <input
+              value={ghTarget}
+              onChange={(e) => setGhTarget(e.target.value)}
+              placeholder="GitHub file link or owner/repo/path"
+              aria-label="Save a file from GitHub into the workspace and pin it"
+              disabled={ghBusy}
+            />
+            <button type="submit" className="btn" disabled={ghBusy || !ghTarget.trim()}>
+              {ghBusy ? "…" : "pin"}
+            </button>
+          </form>
+        )}
         <div className="tree">
           {tree.length === 0 &&
             (treeError ? (

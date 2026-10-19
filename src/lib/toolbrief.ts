@@ -62,7 +62,7 @@ export function toolBriefing(tools: unknown[] | undefined): string {
     lines.push(
       "To work from a repository: github_tree to see its layout, then github_read the files you need; " +
         "a long file comes back in slices, so read on with the line it gives you instead of guessing the rest. " +
-        "Cite files as owner/repo/path:line.",
+        "Cite files as owner/repo/path:line. When the user wants to keep or work on a file, github_read it with save: true.",
     );
   }
   return lines.join("\n");

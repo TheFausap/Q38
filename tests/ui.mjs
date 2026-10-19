@@ -35,8 +35,25 @@ process.env.WORKSPACE_DIR = WORK;
 /* the stub world is on 127.0.0.1, which the page guard refuses by default;
    that refusal has its own test below, and this is the documented switch */
 process.env.Q38_WEB_ALLOW_PRIVATE = "1";
-/* hermetic: the GitHub tools are tested against a stub gh in github-routes.mjs */
-process.env.Q38_GH_BIN = "/nonexistent/q38-test-gh";
+/* hermetic: a stub gh, logged in, that knows one file (the tools themselves
+   are tested in depth in github-routes.mjs) */
+const FAKE_GH = fileURLToPath(new URL(".tmp/fake-gh", import.meta.url));
+fs.mkdirSync(fileURLToPath(new URL(".tmp", import.meta.url)), { recursive: true });
+fs.writeFileSync(
+  FAKE_GH,
+  `#!${process.execPath}
+const a = process.argv.slice(2);
+const out = (s) => { process.stdout.write(s); process.exit(0); };
+if (a[0] === "--version") out("gh version 2.99.0\\n");
+if (a[3] === "user") out("tester\\n");
+if (a[3] === "repos/o/r") out(JSON.stringify({ full_name: "o/r", default_branch: "main" }));
+if (String(a[3]).split("?")[0] === "repos/o/r/contents/docs/notes.md") out("# notes from github\\nline two\\n");
+process.stderr.write("gh: Not Found (HTTP 404)\\n");
+process.exit(1);
+`,
+);
+fs.chmodSync(FAKE_GH, 0o755);
+process.env.Q38_GH_BIN = FAKE_GH;
 /* a skills folder of our own, so the run does not depend on skills:sync */
 const SKILLS = fileURLToPath(new URL(".tmp/skills", import.meta.url));
 fs.rmSync(SKILLS, { recursive: true, force: true });
@@ -823,6 +840,30 @@ try {
   check(uiDoc("settings.json")?.data?.llamaUrl === `http://127.0.0.1:${STUB_PORT}`, "the browser's settings were imported to the server");
   check(uiDoc("index.json")?.data?.order?.includes("sess-mem-1"), "and so is the chat list");
   check(/saved/.test(allText()), "the header says it is saved");
+
+  /* ---------------------------------------- a file from GitHub, pinned */
+  const ghBox = await waitFor("the GitHub box", () => window.document.querySelector(".gh-add input"), 8000);
+  check(!!ghBox, "with gh logged in, the sidebar offers to pin a file from GitHub");
+  const setInput = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+  setInput.call(ghBox, "https://github.com/o/r/blob/main/docs/notes.md");
+  ghBox.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await sleep(60);
+  window.document.querySelector(".gh-add").dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+  const pinnedChip = await waitFor("the pinned chip", () =>
+    [...window.document.querySelectorAll(".chips .chip")].find((c) => /github\/o\/r\/docs\/notes\.md/.test(c.textContent || "")),
+  8000);
+  check(!!pinnedChip, "the file is pinned to the next turn");
+  check(
+    fs.readFileSync(`${WORK}/github/o/r/docs/notes.md`, "utf8") === "# notes from github\nline two\n",
+    "and saved verbatim under ./workspace/github/ (the default branch shares one folder)",
+  );
+  check(/saved to \.\/workspace from GitHub · pinned as context/.test(allText()), "the notice says where it went");
+  setInput.call(ghBox, "o/r/missing.md");
+  ghBox.dispatchEvent(new window.Event("input", { bubbles: true }));
+  await sleep(60);
+  window.document.querySelector(".gh-add").dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+  await waitFor("the failure notice", () => /Could not save from GitHub: not found/.test(allText()), 8000);
+  check(true, "a file that is not there says so");
 
   console.log(results.join("\n"));
   console.log(`ui checks passed (${results.length})`);

@@ -220,6 +220,20 @@ when it is.
 | `github_tree` | files and folders with sizes, the description and default branch; `path` narrows to a folder |
 | `github_read` | one file, numbered, a slice of whole lines at a time (Setup: characters per slice, default 12,000); the result names the `line` to read on from |
 
+**Keeping a file to pin.** A file from GitHub can be saved into the workspace, where it pins
+like any other file:
+
+- paste a github.com file link (or `owner/repo/path`) into the **GitHub file link** box under
+  the dropzone and press **pin**: it is saved and pinned to the next turn in one go;
+- or the model calls `github_read` with `save: true` (it does when you ask it to keep or work
+  on a file): the whole file is saved and the notice says where, so you can tick it in the tree.
+
+Saved files live under `workspace/github/<owner>/<repo>/<path>` (another branch or tag:
+`<repo>@<ref>/`, with `/` in the ref as `~`), verbatim. Saving again refreshes that copy; it
+can never touch a file of yours outside `github/`. Folders and binary files are refused; up
+to 8 MB a file (pinning, as for drops, up to 800 kB). This writes to `./workspace` only —
+nothing is ever written to GitHub.
+
 `repo`/`path` also take github.com links (`…/blob/<ref>/<path>`, `…/tree/…`). Binary files
 and folders are refused with a reason; per turn: 3 searches, 3 trees, 6 reads.
 
@@ -383,8 +397,9 @@ npm run test:ui      # the whole workbench in jsdom, against a stub model
 - `tests/github-routes.mjs` — the GitHub tools against a stub `gh` that records every
   argument vector: trees, slice-by-slice reads that resume on the exact line, blob links,
   folders/binaries/404s, logged-out and missing `gh`, and that only `api --method GET` calls
-  the server built ever reach it — hostile repo/path/ref values are refused before `gh` runs.
-- `tests/github.test.ts` — the text a tree, a slice and a search turn into, the briefing,
+  the server built ever reach it — hostile repo/path/ref values are refused before `gh` runs;
+  saves land under `workspace/github/`, refresh their own copy, never touch your files.
+- `tests/github.test.ts` — the text a tree, a slice, a search and a save turn into, the briefing,
   and guessed argument names (`file_path`, `branch`, `start_line`) mapped onto the declared ones.
 - `tests/storage.test.ts` — the client half: import from the browser on first run, a
   finished reply flushed at once, and after a simulated power cut the page reloads the

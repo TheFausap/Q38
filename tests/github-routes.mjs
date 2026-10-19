@@ -45,8 +45,9 @@ if (p === "repos/o/r/git/trees/main?recursive=1") out(JSON.stringify({ truncated
   { path: "src/lib", type: "tree" },
   { path: "src/lib/a.ts", type: "blob", size: 10 },
 ] }));
-if (p === "repos/o/r/contents/src/big.ts") out(fs.readFileSync(${JSON.stringify(path.join(tmp, "big.ts"))}, "utf8"));
+if (p === "repos/o/r/contents/src/big.ts" || p === "repos/o/r/contents/src/big.ts?ref=main") out(fs.readFileSync(${JSON.stringify(path.join(tmp, "big.ts"))}, "utf8"));
 if (p === "repos/o/r/contents/src/big.ts?ref=v1.0") out("only on v1.0\\n");
+if (p === "repos/o/r/contents/src/big.ts?ref=feature%2Fx") out("on a branch\\n");
 if (p === "repos/o/r/contents/src") out(JSON.stringify([{ name: "big.ts" }, { name: "lib" }]));
 if (p === "repos/o/r/contents/bin.dat") { process.stdout.write(Buffer.from([1, 0, 2, 3])); process.exit(0); }
 if (p.startsWith("search/code?q=")) out(JSON.stringify({ total_count: 1, items: [{ path: "src/lib/a.ts", html_url: "https://github.com/o/r/blob/main/src/lib/a.ts", repository: { full_name: "o/r" } }] }));
@@ -55,6 +56,10 @@ fail("gh: Not Found (HTTP 404)");
 );
 fs.chmodSync(FAKE, 0o755);
 process.env.Q38_GH_BIN = FAKE;
+const WS = path.join(tmp, "workspace");
+fs.mkdirSync(path.join(WS, "src"), { recursive: true });
+fs.writeFileSync(path.join(WS, "src", "big.ts"), "MY OWN FILE — a save must never touch it\n");
+process.env.WORKSPACE_DIR = WS;
 
 const { createApi } = await import("../server/api.mjs");
 const gh = await import("../server/github.mjs");
@@ -110,6 +115,32 @@ try {
   check(r.ok && r.results[0].path === "src/lib/a.ts", "code search finds files");
   check(calls().some((a) => a[3] === `search/code?q=${encodeURIComponent("createApi repo:o/r")}&per_page=10`), "scoped to the repository asked for");
 
+  /* -------------------------------------------------------------- save */
+  const inWs = (rel) => path.join(WS, ...rel.split("/"));
+  r = await post("save", { repo: "o/r", path: "src/big.ts" });
+  check(r.ok && r.saved === "github/o/r/src/big.ts" && r.lines === 300, "a save lands under github/<owner>/<repo>/");
+  check(fs.readFileSync(inWs(r.saved), "utf8") === big, "verbatim, the whole file");
+  check(r.content === big && r.replaced === false, "and comes back with its text, ready to pin");
+  r = await post("save", { target: "o/r/src/big.ts" });
+  check(r.ok && r.replaced === true, "saving again refreshes the earlier copy");
+  r = await post("save", { target: "https://github.com/o/r/blob/main/src/big.ts" });
+  check(r.ok && r.saved === "github/o/r/src/big.ts" && r.replaced, "a link that names the default branch is the same copy");
+  r = await post("save", { target: "https://github.com/o/r/blob/v1.0/src/big.ts" });
+  check(r.ok && r.saved === "github/o/r@v1.0/src/big.ts" && fs.readFileSync(inWs(r.saved), "utf8") === "only on v1.0\n", "another ref gets its own folder");
+  r = await post("save", { repo: "o/r", path: "src/big.ts", ref: "feature/x" });
+  check(r.ok && r.saved === "github/o/r@feature~x/src/big.ts", "a ref with a slash stays one folder");
+  check(fs.readFileSync(path.join(WS, "src", "big.ts"), "utf8").startsWith("MY OWN FILE"), "a file of yours with the same name is untouched");
+  r = await post("save", { target: "https://github.com/o/r" });
+  check(!r.ok && /repository, not a file/.test(r.error), "a repository link is not a file");
+  r = await post("save", { target: "https://github.com/o/r/tree/main/src" });
+  check(!r.ok && /folder/.test(r.error), "nor is a folder link");
+  r = await post("save", { repo: "o/r", path: "src" });
+  check(!r.ok && /folder/.test(r.error), "a folder path is refused");
+  r = await post("save", { repo: "o/r", path: "bin.dat" });
+  check(!r.ok && /binary/.test(r.error), "a binary file is not saved");
+  r = await post("save", { target: "o/r/../../../etc/passwd" });
+  check(!r.ok && !fs.existsSync(path.join(tmp, "etc")), "a path that climbs out is refused");
+
   /* ------------------------------------------------- what may not happen */
   const before = calls().length;
   for (const bad of [
@@ -125,7 +156,7 @@ try {
   }
   check(calls().length === before, "none of those reached gh");
   r = await post("delete", { repo: "o/r" });
-  check(r.ok === false && /unknown github route/.test(r.error), "there is no route that writes");
+  check(r.ok === false && /unknown github route/.test(r.error), "there is no route that writes to GitHub");
 
   const all = calls();
   const apiCalls = all.filter((a) => a[0] === "api");

@@ -686,7 +686,7 @@ export async function webFetchPage(
 }
 
 /** GitHub through the server's `gh`; never throws, always an outcome. */
-export async function githubCall<T>(op: "tree" | "read" | "search", body: Record<string, unknown>): Promise<T> {
+export async function githubCall<T>(op: "tree" | "read" | "search" | "save", body: Record<string, unknown>): Promise<T> {
   try {
     const res = await fetch(`/api/github/${op}`, {
       method: "POST",

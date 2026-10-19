@@ -1,4 +1,7 @@
 import { execFile } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { writeDurable } from "./durable.mjs";
 
 /**
  * GitHub through the `gh` CLI on the machine that runs the Q38 server.
@@ -391,4 +394,97 @@ export async function githubSearch({ query: rawQuery, repo: rawRepo, kind = "cod
           url: it.html_url,
         }));
   return { ok: true, kind: k, query: q, total: r.json?.total_count ?? results.length, results };
+}
+
+/* -------------------------------------------------------------- save */
+
+/** Largest file one save will write into the workspace. */
+export const GH_SAVE_MAX_BYTES = 8 * 1024 * 1024;
+/** Saved files at most this size come back with their text, ready to pin. */
+const GH_PIN_MAX_BYTES = 800_000;
+
+/**
+ * Where a file from GitHub lives in the workspace: its own namespace, so a
+ * save can refresh an earlier copy but never touch a file of yours.
+ *
+ *   github/<owner>/<repo>/<path>          default branch
+ *   github/<owner>/<repo>@<ref>/<path>    any other ref ("/" in it becomes "~")
+ */
+export function workspacePathFor(repo, ref, filePath) {
+  const [owner, name] = repo.split("/");
+  const dir = ref ? `${name}@${ref.replace(/\//g, "~")}` : name;
+  return ["github", owner, dir, ...filePath.split("/")].join("/");
+}
+
+/**
+ * "owner/repo/path/to/file", a github.com blob link or a raw link, as
+ * { repo, ref, path }. Throws with a reason a person can act on.
+ */
+export function parseTarget(raw) {
+  const s = String(raw || "").trim();
+  const fromUrl = parseGithubUrl(s);
+  if (fromUrl) {
+    if (!fromUrl.path) throw new Error("that link is a repository, not a file — open the file on GitHub and copy its address");
+    if (/\/tree\//.test(s)) throw new Error("that link is a folder — link to one file inside it");
+    return fromUrl;
+  }
+  const parts = s.replace(/^\/+/, "").split("/");
+  if (parts.length < 3) throw new Error("give a github.com file link, or owner/repo/path/to/file");
+  return { repo: `${parts[0]}/${parts[1]}`, ref: "", path: parts.slice(2).join("/") };
+}
+
+/** Fetch one whole file through gh and write it, verbatim, into the workspace. */
+export async function githubSave({ target, repo: rawRepo, path: rawPath, ref: rawRef } = {}, root) {
+  let repo, ref, filePath, encoded;
+  try {
+    const t = target ? parseTarget(target) : { repo: rawRepo, ref: rawRef, path: rawPath };
+    const pathUrl = !target && parseGithubUrl(rawPath);
+    repo = parseRepo(pathUrl ? pathUrl.repo : t.repo);
+    ref = parseRef(rawRef || (pathUrl ? pathUrl.ref : t.ref) || "");
+    ({ path: filePath, encoded } = parsePath(pathUrl ? pathUrl.path : t.path));
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+  if (!filePath) return { ok: false, error: "no file named" };
+  const q = ref ? `?ref=${encodeURIComponent(ref)}` : "";
+  const got = await apiGet(`repos/${repo}/contents/${encoded}${q}`, { raw: true });
+  if (!got.ok) return got;
+  const bytes = got.bytes;
+  if (bytes.subarray(0, 1).toString("utf8") === "[") {
+    try {
+      if (Array.isArray(JSON.parse(bytes.toString("utf8")))) {
+        return { ok: false, error: `"${filePath}" is a folder — save the files inside it one at a time` };
+      }
+    } catch {
+      /* a file that starts with "[" */
+    }
+  }
+  if (looksBinary(bytes)) return { ok: false, error: `"${filePath}" is a binary file; only text files are saved` };
+  if (bytes.length > GH_SAVE_MAX_BYTES) {
+    return { ok: false, error: `"${filePath}" is ${Math.round(bytes.length / 1e6)} MB, over the ${GH_SAVE_MAX_BYTES / 1e6} MB limit` };
+  }
+  /* the default branch named explicitly (a /blob/main/ link) is the same copy as no ref */
+  let folderRef = ref;
+  if (ref) {
+    const info = await repoInfo(repo);
+    if (info.ok && info.defaultBranch === ref) folderRef = "";
+  }
+  const rel = workspacePathFor(repo, folderRef, filePath);
+  const full = path.resolve(root, ...rel.split("/"));
+  const rootWithSep = root.endsWith(path.sep) ? root : root + path.sep;
+  if (!full.startsWith(rootWithSep)) return { ok: false, error: "that path would leave the workspace" };
+  const existed = fs.existsSync(full);
+  writeDurable(full, bytes);
+  const text = bytes.toString("utf8");
+  return {
+    ok: true,
+    repo,
+    ref: ref || "",
+    path: filePath,
+    saved: rel,
+    bytes: bytes.length,
+    lines: text.split("\n").length - (text.endsWith("\n") ? 1 : 0),
+    replaced: existed,
+    content: bytes.length <= GH_PIN_MAX_BYTES ? text : undefined,
+  };
 }

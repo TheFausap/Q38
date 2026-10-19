@@ -9,7 +9,7 @@ import { createOcr } from "./ocr.mjs";
 import { currentIndex, publicIndex, readSkill, searchSkills } from "./skills.mjs";
 import { writeDurable, writeJsonDurable } from "./durable.mjs";
 import { loadAll, saveDocs } from "./store.mjs";
-import { githubRead, githubSearch, githubStatus, githubTree } from "./github.mjs";
+import { githubRead, githubSave, githubSearch, githubStatus, githubTree } from "./github.mjs";
 
 const SKIP_DIRS = new Set([
   "node_modules",
@@ -1679,7 +1679,13 @@ export function createApi() {
 
       if (url.pathname.startsWith("/api/github/") && req.method === "POST") {
         const op = url.pathname.slice("/api/github/".length);
-        const run = { tree: githubTree, read: githubRead, search: githubSearch }[op];
+        const run = {
+          tree: githubTree,
+          read: githubRead,
+          search: githubSearch,
+          /* the one GitHub route that writes — into ./workspace, never to GitHub */
+          save: (p) => githubSave(p, workspaceRoot()),
+        }[op];
         if (!run) {
           sendJson(res, 404, { ok: false, error: "unknown github route" });
           return;

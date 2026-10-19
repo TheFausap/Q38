@@ -42,9 +42,11 @@ import {
   fileText as githubFileText,
   githubSource,
   githubTapeLine,
+  savedText as githubSavedText,
   searchText as githubSearchText,
   treeText as githubTreeText,
   type GithubReadOutcome,
+  type GithubSaveOutcome,
   type GithubSearchOutcome,
   type GithubStatus,
   type GithubTreeOutcome,
@@ -1432,11 +1434,45 @@ export function App() {
           ),
         );
         if (out.ok && out.repo && out.path) sources.push(githubSource(out.repo, out.path, out.url));
+        /* save: true — the whole file into ./workspace, for the user to pin */
+        if (out.ok && a.save === true) {
+          const saved = await githubCall<GithubSaveOutcome>("save", { repo: out.repo, path: out.path, ref });
+          text += `\n\n${githubSavedText(saved)}`;
+          setDropNotice(
+            saved.ok
+              ? `${saved.saved} → saved to ./workspace from GitHub${saved.replaced ? " (refreshed)" : ""} · tick it in the tree to pin it`
+              : `Could not save ${out.path} from GitHub: ${saved.error}`,
+          );
+          if (saved.ok) void refreshTree();
+        }
       }
       setWebActive(null);
       return { text, sources };
     },
-    [settings.githubChars],
+    [settings.githubChars, refreshTree],
+  );
+
+  /** The sidebar's "from GitHub" box: save one file into ./workspace and pin it. */
+  const saveFromGithub = useCallback(
+    async (target: string) => {
+      const out = await githubCall<GithubSaveOutcome>("save", { target });
+      if (!out.ok || !out.saved) {
+        setDropNotice(`Could not save from GitHub: ${out.error || "no reason given"}`);
+        return false;
+      }
+      void refreshTree();
+      if (out.content === undefined) {
+        setDropNotice(`${out.saved} → saved to ./workspace from GitHub · too big to pin as context`);
+        return true;
+      }
+      const pin: Attachment = { path: out.saved, content: out.content, source: "workspace" };
+      setAttachments((cur) => [...cur.filter((x) => x.path !== pin.path), pin]);
+      setDropNotice(
+        `${out.saved} → saved to ./workspace from GitHub${out.replaced ? " (refreshed)" : ""} · pinned as context`,
+      );
+      return true;
+    },
+    [refreshTree],
   );
 
   const measureExact = useCallback(async () => {
@@ -2727,6 +2763,8 @@ export function App() {
             onPreviewFile={previewFile}
             onFiles={onFiles}
             treeError={treeError}
+            github={settings.github && ghStatus?.ok ? { login: ghStatus.login || "" } : null}
+            onGithubSave={saveFromGithub}
           />
         )}
         <Chat

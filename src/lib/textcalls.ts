@@ -38,6 +38,7 @@ const ALIASES: Record<string, string[]> = {
   ref: ["branch", "tag", "commit", "sha", "revision", "rev"],
   line: ["start_line", "from_line", "line_number", "lineno", "start", "offset"],
   kind: ["type", "search_type"],
+  save: ["keep", "store", "download", "save_to_workspace"],
 };
 
 function schemaOf(tools: unknown[], name: string): Schema | null {

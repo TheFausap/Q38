@@ -5,7 +5,7 @@
  *   node --import ./tests/ts-resolve.mjs --experimental-strip-types tests/github.test.ts
  */
 import assert from "node:assert/strict";
-import { GITHUB_TOOLS, fileText, searchText, treeText } from "../src/lib/github.ts";
+import { GITHUB_TOOLS, fileText, savedText, searchText, treeText } from "../src/lib/github.ts";
 import { parseTextToolCalls } from "../src/lib/textcalls.ts";
 import { toolBriefing } from "../src/lib/toolbrief.ts";
 
@@ -71,5 +71,15 @@ const { calls } = parseTextToolCalls(
 );
 assert.equal(calls.length, 1);
 assert.deepEqual(JSON.parse(calls[0].arguments), { repo: "o/r", path: "src/a.ts", ref: "dev", line: 120 });
+
+/* save: offered on github_read, said back in a line, and guessed names land on it */
+assert.ok("save" in (GITHUB_TOOLS[2].function.parameters.properties as Record<string, unknown>));
+assert.match(savedText({ ok: true, saved: "github/o/r/src/a.ts", lines: 12, replaced: true }), /Saved to the workspace: github\/o\/r\/src\/a\.ts\nThe whole file \(12 lines, replacing the earlier copy\)/);
+assert.match(savedText({ ok: false, error: "binary" }), /Not saved to the workspace\nbinary\./);
+const kept = parseTextToolCalls(
+  "<tool_call>\n<function=github_read>\n<parameter=repo>\no/r\n</parameter>\n<parameter=path>\na.ts\n</parameter>\n<parameter=keep>\ntrue\n</parameter>\n</function>\n</tool_call>",
+  GITHUB_TOOLS,
+);
+assert.equal(JSON.parse(kept.calls[0].arguments).save, true);
 
 console.log("github tool checks passed");
