@@ -33,6 +33,11 @@ const ALIASES: Record<string, string[]> = {
   section: ["section_id", "section_name", "section_title", "heading", "chapter"],
   chunk: ["chunk_id", "chunk_index", "start", "from", "offset"],
   count: ["n", "num", "num_results", "max_results", "limit", "k", "top_k"],
+  repo: ["repository", "repo_name", "owner_repo", "full_name", "project"],
+  path: ["file_path", "filepath", "filename", "file", "folder", "dir", "directory"],
+  ref: ["branch", "tag", "commit", "sha", "revision", "rev"],
+  line: ["start_line", "from_line", "line_number", "lineno", "start", "offset"],
+  kind: ["type", "search_type"],
 };
 
 function schemaOf(tools: unknown[], name: string): Schema | null {

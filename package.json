@@ -11,8 +11,8 @@
     "start": "node server/prod.mjs",
     "serve": "node server/prod.mjs",
     "test": "npm run test:unit && npm run test:server && npm run test:ui",
-    "test:unit": "node --no-warnings --experimental-strip-types tests/memory.test.ts && node --no-warnings --experimental-strip-types tests/web.test.ts && node --no-warnings --experimental-strip-types tests/skills.test.ts && node --no-warnings --experimental-strip-types tests/library.test.ts && node --no-warnings --experimental-strip-types tests/toolbrief.test.ts && node --no-warnings --experimental-strip-types tests/textcalls.test.ts && node --no-warnings --experimental-strip-types tests/markdown.test.ts && node --no-warnings --import ./tests/ts-resolve.mjs --experimental-strip-types tests/storage.test.ts",
-    "test:server": "node tests/store-routes.mjs && node tests/web-routes.mjs && node tests/skills-routes.mjs && node tests/library-routes.mjs",
+    "test:unit": "node --no-warnings --experimental-strip-types tests/memory.test.ts && node --no-warnings --experimental-strip-types tests/web.test.ts && node --no-warnings --experimental-strip-types tests/skills.test.ts && node --no-warnings --experimental-strip-types tests/library.test.ts && node --no-warnings --experimental-strip-types tests/toolbrief.test.ts && node --no-warnings --experimental-strip-types tests/textcalls.test.ts && node --no-warnings --experimental-strip-types tests/markdown.test.ts && node --no-warnings --import ./tests/ts-resolve.mjs --experimental-strip-types tests/storage.test.ts && node --no-warnings --import ./tests/ts-resolve.mjs --experimental-strip-types tests/github.test.ts",
+    "test:server": "node tests/store-routes.mjs && node tests/github-routes.mjs && node tests/web-routes.mjs && node tests/skills-routes.mjs && node tests/library-routes.mjs",
     "test:ui": "vite build --config tests/vite.ui-test.config.ts --ssr tests/ui-test-entry.tsx --logLevel warn && node tests/ui.mjs",
     "skills:sync": "node scripts/sync-skills.mjs"
   },

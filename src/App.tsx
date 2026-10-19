@@ -31,7 +31,24 @@ import {
   webFetchPage,
   webSearch,
 } from "./lib/api";
+import { githubCall, githubStatusCheck } from "./lib/api";
 import type { OcrInfo, WireMessage } from "./lib/api";
+import {
+  GH_MAX_CHARS,
+  GH_MAX_READS_PER_TURN,
+  GH_MAX_SEARCHES_PER_TURN,
+  GH_MAX_TREES_PER_TURN,
+  GITHUB_TOOLS,
+  fileText as githubFileText,
+  githubSource,
+  githubTapeLine,
+  searchText as githubSearchText,
+  treeText as githubTreeText,
+  type GithubReadOutcome,
+  type GithubSearchOutcome,
+  type GithubStatus,
+  type GithubTreeOutcome,
+} from "./lib/github";
 import {
   activeCompaction,
   cutIdOf,
@@ -367,6 +384,16 @@ export function App() {
   useEffect(() => {
     if (settings.skills) void reloadSkills();
   }, [settings.skills, reloadSkills]);
+  /** whether the server's gh is there and logged in (null until first asked) */
+  const [ghStatus, setGhStatus] = useState<GithubStatus | null>(null);
+  const reloadGithub = useCallback(async () => {
+    const st = await githubStatusCheck();
+    setGhStatus(st);
+    return st;
+  }, []);
+  useEffect(() => {
+    if (settings.github) void reloadGithub();
+  }, [settings.github, reloadGithub]);
   const [memBusy, setMemBusy] = useState<string | null>(null);
   const [memRoot, setMemRoot] = useState<string>("");
   const [folding, setFolding] = useState(false);
@@ -1363,6 +1390,55 @@ export function App() {
     [settings],
   );
 
+  /** One GitHub call through the server's gh: the text the model reads, and where it looked. */
+  const githubForTool = useCallback(
+    async (call: { name: string; arguments: string }) => {
+      const a = argsOf(call.arguments);
+      const repo = String(a.repo ?? "").trim();
+      const path = String(a.path ?? "").trim();
+      const ref = String(a.ref ?? "").trim();
+      const sources: { title: string; url: string }[] = [];
+      let text = "";
+      if (call.name === "github_search") {
+        const query = String(a.query ?? "").trim();
+        const kind = a.kind === "repos" ? "repos" : "code";
+        setWebActive({ kind: "search", label: `GitHub: ${query.slice(0, 60)}` });
+        const out = await githubCall<GithubSearchOutcome>("search", { query, repo, kind, count: 10 });
+        text = githubSearchText({ query, repo }, out);
+        setWebLine(githubTapeLine(call.name, query, out.ok, out.ok ? `${out.results?.length ?? 0} HITS` : out.error));
+      } else if (call.name === "github_tree") {
+        setWebActive({ kind: "open", label: `${repo}${path ? `/${path}` : ""}` });
+        const out = await githubCall<GithubTreeOutcome>("tree", { repo, path, ref });
+        text = githubTreeText({ repo, path }, out);
+        setWebLine(githubTapeLine(call.name, repo, out.ok, out.ok ? `${out.entries?.length ?? 0} ENTRIES` : out.error));
+        if (out.ok && out.repo) sources.push(githubSource(out.repo));
+      } else {
+        const line = Math.max(1, Math.round(Number(a.line) || 1));
+        setWebActive({ kind: "open", label: path || repo });
+        const out = await githubCall<GithubReadOutcome>("read", {
+          repo,
+          path,
+          ref,
+          line,
+          chars: Math.min(GH_MAX_CHARS, settings.githubChars),
+        });
+        text = githubFileText(out);
+        setWebLine(
+          githubTapeLine(
+            call.name,
+            path || repo,
+            out.ok,
+            out.ok ? `L${out.startLine}-${out.endLine}/${out.totalLines}` : out.error,
+          ),
+        );
+        if (out.ok && out.repo && out.path) sources.push(githubSource(out.repo, out.path, out.url));
+      }
+      setWebActive(null);
+      return { text, sources };
+    },
+    [settings.githubChars],
+  );
+
   const measureExact = useCallback(async () => {
     const target = currentSession();
     if (!target) return;
@@ -1823,6 +1899,9 @@ export function App() {
       doc_add: DOC_MAX_ADDS_PER_TURN,
       doc_search: DOC_MAX_SEARCHES_PER_TURN,
       doc_read: DOC_MAX_READS_PER_TURN,
+      github_search: GH_MAX_SEARCHES_PER_TURN,
+      github_tree: GH_MAX_TREES_PER_TURN,
+      github_read: GH_MAX_READS_PER_TURN,
     };
     const used: Record<string, number> = {};
     const sources: { title: string; url: string }[] = [];
@@ -1877,6 +1956,16 @@ export function App() {
           text = r.texts.join("\n\n");
           sources.push(...r.sources);
           stats.docs = r.used;
+          break;
+        }
+        case "github_search":
+        case "github_tree":
+        case "github_read": {
+          const r = await githubForTool(call);
+          text = r.text;
+          sources.push(...r.sources);
+          stats.opened = call.name === "github_read" ? 1 : 0;
+          stats.searched = call.name === "github_search" ? 1 : 0;
           break;
         }
         default:
@@ -2259,6 +2348,7 @@ export function App() {
     const offered: unknown[] = [];
     if (archivesOf(target).length > 0 && settings.recallTool) offered.push(RECALL_TOOL);
     if (settings.webSearch) offered.push(...WEB_TOOLS);
+    if (settings.github && ghStatus?.ok) offered.push(...GITHUB_TOOLS);
     if (settings.skills) offered.push(...skillTools(skills));
     if (settings.library) offered.push(...libraryTools(libDocs ?? [], { ocr: Boolean(settings.ocrUrl.trim()) }));
     const tools: unknown[] | undefined = offered.length ? offered : undefined;
@@ -2737,6 +2827,8 @@ export function App() {
           onChange={setSettings}
           onClose={() => setSettingsOpen(false)}
           onPing={() => void refreshStatus()}
+          github={ghStatus}
+          onGithubCheck={() => void reloadGithub()}
         />
       )}
     </div>
@@ -2784,11 +2876,15 @@ function SettingsModal({
   onChange,
   onClose,
   onPing,
+  github,
+  onGithubCheck,
 }: {
   settings: Settings;
   onChange: (s: Settings) => void;
   onClose: () => void;
   onPing: () => void;
+  github: GithubStatus | null;
+  onGithubCheck: () => void;
 }) {
   return (
     <div className="modal-back" onClick={onClose}>
@@ -2910,6 +3006,48 @@ function SettingsModal({
             />
           </label>
         </div>
+        <div className="group-label">GitHub</div>
+        <p className="hint">
+          The model can list and read repositories through the <code>gh</code> CLI on the machine
+          running the Q38 server — as whoever <code>gh</code> is logged in as, so your private
+          repositories too. Read-only: the server only ever sends <code>gh api --method GET</code>,
+          built from the repository, path and ref the model names; it never runs a command the model
+          wrote.
+        </p>
+        <label className="tiny-check block">
+          <input
+            type="checkbox"
+            checked={settings.github}
+            onChange={(e) => onChange({ ...settings, github: e.target.checked })}
+          />
+          let the model search and read GitHub through gh
+        </label>
+        <p className="hint tiny">
+          {github === null
+            ? "gh: not checked yet"
+            : github.ok
+              ? `gh ${github.version || ""} · logged in as ${github.login}`
+              : `gh: ${github.error || "not available"}`}{" "}
+          <button type="button" className="linkish" onClick={onGithubCheck}>
+            check again
+          </button>
+        </p>
+        <label className="field">
+          <span>characters per file slice</span>
+          <input
+            type="number"
+            min={2000}
+            max={GH_MAX_CHARS}
+            step={1000}
+            value={settings.githubChars}
+            onChange={(e) =>
+              onChange({
+                ...settings,
+                githubChars: Math.max(2000, Math.min(GH_MAX_CHARS, Number(e.target.value) || 12000)),
+              })
+            }
+          />
+        </label>
         <div className="group-label">Library &amp; skills</div>
         <p className="hint">
           Optional servers for the library: embeddings let search match by meaning, OCR reads scanned

@@ -1,3 +1,4 @@
+import type { GithubStatus } from "./github";
 import type {
   ArchiveRef,
   ChatMessage,
@@ -682,6 +683,34 @@ export async function webFetchPage(
 ): Promise<WebPageOutcome> {
   const json = await postWeb("/api/web/fetch", { url, chars }, settings);
   return json as unknown as WebPageOutcome;
+}
+
+/** GitHub through the server's `gh`; never throws, always an outcome. */
+export async function githubCall<T>(op: "tree" | "read" | "search", body: Record<string, unknown>): Promise<T> {
+  try {
+    const res = await fetch(`/api/github/${op}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const text = await res.text();
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      return { ok: false, error: `the workbench answered ${res.status} with something that is not JSON` } as T;
+    }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) } as T;
+  }
+}
+
+export async function githubStatusCheck(): Promise<GithubStatus> {
+  try {
+    const res = await fetch("/api/github/status", { cache: "no-store" });
+    return (await res.json()) as GithubStatus;
+  } catch (err) {
+    return { ok: false, available: false, error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 async function getSkills(path: string): Promise<Record<string, unknown>> {

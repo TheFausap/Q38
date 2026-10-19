@@ -206,6 +206,29 @@ if you really do want it reading your intranet.
 Settings live in Setup: provider, SearXNG URL, API key, results per search (1–8),
 characters per page (1 000–16 000).
 
+## GitHub
+
+The model can search GitHub, list a repository and read its files through the **`gh` CLI on
+the machine running the Q38 server** — as whoever `gh` is logged in there, so your private
+repositories too, at the authenticated rate limit. Run `gh auth login` on that machine once;
+Setup shows whether `gh` is found and who it is logged in as, and the tools are only offered
+when it is.
+
+| tool | what it does |
+|---|---|
+| `github_search` | code search (optionally inside one `repo`), or `kind: repos` |
+| `github_tree` | files and folders with sizes, the description and default branch; `path` narrows to a folder |
+| `github_read` | one file, numbered, a slice of whole lines at a time (Setup: characters per slice, default 12,000); the result names the `line` to read on from |
+
+`repo`/`path` also take github.com links (`…/blob/<ref>/<path>`, `…/tree/…`). Binary files
+and folders are refused with a reason; per turn: 3 searches, 3 trees, 6 reads.
+
+**Read-only by construction.** The model never writes a command. The server checks the repo,
+path and ref against strict patterns and builds every call itself as
+`gh api --method GET repos/<owner>/<repo>/…`, run with `execFile` (no shell), a 20 s timeout and
+an 8 MB cap; no `-f`/`-F`/`--input` is ever passed, and there is no route that writes.
+`Q38_GH_BIN` points at a different `gh` binary.
+
 ## Skills
 
 The model can consult **skills** — procedure manuals in the [Agent Skills](https://agentskills.io/)
@@ -357,6 +380,12 @@ npm run test:ui      # the whole workbench in jsdom, against a stub model
 - `tests/store-routes.mjs` — the state store on disk: durable writes leave no temp
   files, revisions, a late same-tab write never overwrites a newer reply, a stale tab
   gets a conflict, deletes, path safety, corrupt and torn files.
+- `tests/github-routes.mjs` — the GitHub tools against a stub `gh` that records every
+  argument vector: trees, slice-by-slice reads that resume on the exact line, blob links,
+  folders/binaries/404s, logged-out and missing `gh`, and that only `api --method GET` calls
+  the server built ever reach it — hostile repo/path/ref values are refused before `gh` runs.
+- `tests/github.test.ts` — the text a tree, a slice and a search turn into, the briefing,
+  and guessed argument names (`file_path`, `branch`, `start_line`) mapped onto the declared ones.
 - `tests/storage.test.ts` — the client half: import from the browser on first run, a
   finished reply flushed at once, and after a simulated power cut the page reloads the
   latest chat and settings from the server, not the browser's stale copy.

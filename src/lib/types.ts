@@ -236,6 +236,10 @@ export type Settings = {
   webResults: number;
   /** characters of one page that may enter the prompt */
   webPageChars: number;
+  /** let the model read GitHub through the server's `gh` CLI */
+  github: boolean;
+  /** characters of one file slice that may enter the prompt */
+  githubChars: number;
   /** let the model look up skills (procedure manuals) from the skills folder */
   skills: boolean;
   /** characters of one skill file that may enter the prompt */
@@ -323,6 +327,8 @@ export const DEFAULT_SETTINGS: Settings = {
   searchApiKey: "",
   webResults: 5,
   webPageChars: 6000,
+  github: true,
+  githubChars: 12000,
   skills: true,
   skillChars: 24000,
   library: true,

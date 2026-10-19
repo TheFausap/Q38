@@ -852,6 +852,14 @@ export function Inspector({
             />
             let the model search the web and read pages
           </label>
+          <label className="tiny-check block">
+            <input
+              type="checkbox"
+              checked={settings.github}
+              onChange={(e) => setSetting("github", e.target.checked)}
+            />
+            let the model read GitHub through gh
+          </label>
           <p className="hint tiny">
             Provider: <strong>{settings.webProvider}</strong>
             {settings.webProvider === "auto"

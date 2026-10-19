@@ -20,6 +20,9 @@ const PURPOSE: Record<string, string> = {
   skill_load: "load a procedure manual for a library or method",
   skill_search: "find a procedure manual",
   recall: "read earlier conversation back off the disk",
+  github_search: "search GitHub code or repositories",
+  github_tree: "list a GitHub repository's files",
+  github_read: "read a file from a GitHub repository, a slice of lines at a time",
 };
 
 export function toolNames(tools: unknown[] | undefined): string[] {
@@ -40,6 +43,7 @@ export function toolBriefing(tools: unknown[] | undefined): string {
   ];
   const can: string[] = [];
   if (has("web_search") || has("web_fetch")) can.push("you DO have internet access through web_search and web_fetch");
+  if (has("github_read")) can.push("you CAN read GitHub repositories — public and the user's private ones — through github_tree and github_read");
   if (has("doc_add")) can.push("you CAN download and read PDFs and papers through doc_add, then doc_search and doc_read");
   if (can.length) {
     lines.push(
@@ -52,6 +56,13 @@ export function toolBriefing(tools: unknown[] | undefined): string {
     lines.push(
       "To work from a paper: doc_add(url) once, then doc_search for the passage or doc_read for a section, " +
         "and quote it with section and page. Answer about a paper from what you read, not from memory.",
+    );
+  }
+  if (has("github_read")) {
+    lines.push(
+      "To work from a repository: github_tree to see its layout, then github_read the files you need; " +
+        "a long file comes back in slices, so read on with the line it gives you instead of guessing the rest. " +
+        "Cite files as owner/repo/path:line.",
     );
   }
   return lines.join("\n");

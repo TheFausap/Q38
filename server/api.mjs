@@ -9,6 +9,7 @@ import { createOcr } from "./ocr.mjs";
 import { currentIndex, publicIndex, readSkill, searchSkills } from "./skills.mjs";
 import { writeDurable, writeJsonDurable } from "./durable.mjs";
 import { loadAll, saveDocs } from "./store.mjs";
+import { githubRead, githubSearch, githubStatus, githubTree } from "./github.mjs";
 
 const SKIP_DIRS = new Set([
   "node_modules",
@@ -1668,6 +1669,29 @@ export function createApi() {
           return;
         }
         sendJson(res, 404, { ok: false, error: "unknown library route" });
+        return;
+      }
+
+      if (url.pathname === "/api/github/status" && req.method === "GET") {
+        sendJson(res, 200, await githubStatus());
+        return;
+      }
+
+      if (url.pathname.startsWith("/api/github/") && req.method === "POST") {
+        const op = url.pathname.slice("/api/github/".length);
+        const run = { tree: githubTree, read: githubRead, search: githubSearch }[op];
+        if (!run) {
+          sendJson(res, 404, { ok: false, error: "unknown github route" });
+          return;
+        }
+        let payload;
+        try {
+          payload = JSON.parse((await readBodyCapped(req, 64 * 1024)).toString("utf8") || "{}");
+        } catch {
+          sendJson(res, 400, { ok: false, error: "the body is not JSON" });
+          return;
+        }
+        sendJson(res, 200, await run(payload && typeof payload === "object" ? payload : {}));
         return;
       }
 

@@ -35,6 +35,8 @@ process.env.WORKSPACE_DIR = WORK;
 /* the stub world is on 127.0.0.1, which the page guard refuses by default;
    that refusal has its own test below, and this is the documented switch */
 process.env.Q38_WEB_ALLOW_PRIVATE = "1";
+/* hermetic: the GitHub tools are tested against a stub gh in github-routes.mjs */
+process.env.Q38_GH_BIN = "/nonexistent/q38-test-gh";
 /* a skills folder of our own, so the run does not depend on skills:sync */
 const SKILLS = fileURLToPath(new URL(".tmp/skills", import.meta.url));
 fs.rmSync(SKILLS, { recursive: true, force: true });
