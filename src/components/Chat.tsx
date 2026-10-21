@@ -145,7 +145,7 @@ export function Chat({
       {demoNotice && (
         <div className="banner">
           llama-server is offline — this reply is a local demo stream so you can exercise the
-          workbench. Start the MAX MTP server, then send again.
+          workbench. Start the MTP server, then send again.
         </div>
       )}
 

@@ -320,7 +320,7 @@ export async function request<T>(url: string, opts: RequestOpts = {}): Promise<T
 }
 \`\`\`
 
-Wire this to llama-server as \`request(url + "/v1/chat/completions", { method: "POST", body })\`. Swap the demo stream for a live MAX MTP endpoint when \`llama-server\` is up.
+Wire this to llama-server as \`request(url + "/v1/chat/completions", { method: "POST", body })\`. Swap the demo stream for a live MTP endpoint when \`llama-server\` is up.
 
 **Defaults for this model:** temp 0.7 · top_k 64 · min_p 0.05 · top_p 0.95 · repeat_penalty off · context ≥ 24k (64k+ for real sessions) · no prompt cache.
 `.trim();

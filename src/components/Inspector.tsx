@@ -232,7 +232,7 @@ export function Inspector({
       {tab === "sample" && (
         <div className="rail-scroll sample-form">
           <p className="hint">
-            DavidAU tester defaults for MAX: temp 0.5–1, top_k 64, min_p 0.05, top_p 0.95,
+            DavidAU tester defaults: temp 0.5–1, top_k 64, min_p 0.05, top_p 0.95,
             repeat penalty off, no cache, 24k+ context.
           </p>
           <Slider
@@ -771,7 +771,7 @@ export function Inspector({
       {tab === "server" && (
         <div className="rail-scroll">
           <p className="hint">
-            NEO <strong>MAX</strong> MTP: output tensor BF16, MTP tensors Q8. Pair with
+            Jumbo Fusion NEO <strong>MTP</strong> quant: MTP heads built in. Pair with
             llama-server <code>--spec-type draft-mtp</code>.
           </p>
           <dl className="kv">
@@ -922,7 +922,7 @@ export function Inspector({
           </p>
 
           <pre className="cmd">
-            {`llama-server \\\n  -m Qwen3.8-27B-Turbo-Brilliance-50X-RI-NEO-MAX-MTP-Q6_K.gguf \\\n  --alias q38-max --host 0.0.0.0 --port 8080 \\\n  -c 65536 -ngl 99 -fa on --jinja \\\n  --reasoning-format deepseek \\\n  --temp 0.7 --top-k 64 --min-p 0.05 --top-p 0.95 \\\n  --repeat-penalty 1.0 \\\n  --spec-type draft-mtp --spec-draft-n-max 3`}
+            {`llama-server \\\n  -m Qwen3.8-27B-Jumbo-FIQ-747-900-T-Brill-50X-NEO-MTP-Q6_K.gguf \\\n  --alias q38-max --host 0.0.0.0 --port 8080 \\\n  -c 65536 -ngl 99 -fa on --jinja \\\n  --reasoning-format deepseek \\\n  --temp 0.7 --top-k 64 --min-p 0.05 --top-p 0.95 \\\n  --repeat-penalty 1.0 \\\n  --spec-type draft-mtp --spec-draft-n-max 3`}
           </pre>
           {preview && (
             <div className="preview">

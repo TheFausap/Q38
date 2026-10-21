@@ -143,7 +143,7 @@ export const MODES: ModeDef[] = [
     group: "engineers",
     bestFor: "Deep science, measurement, and careful experimental design.",
     example:
-      "Design a fair tokens/sec bench for MAX MTP vs non-MTP on the same prompt set.",
+      "Design a fair tokens/sec bench for MTP vs non-MTP on the same prompt set.",
   },
   {
     id: "teacher",

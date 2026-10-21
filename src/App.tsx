@@ -2569,7 +2569,7 @@ export function App() {
   if (!session) return null;
   const modelName =
     status?.models[0]?.id?.split(/[/\\]/).pop() ||
-    "Qwen3.8-27B Turbo-Brilliance NEO MAX MTP";
+    "Qwen3.8-27B Jumbo Fusion IQ 747-900 Turbo-Brilliance NEO MTP";
 
   return (
     <div className="shell">
@@ -2581,7 +2581,7 @@ export function App() {
           <span className="wordmark">Q38</span>
           <div className="brand-meta">
             <div className="brand-title">Turbo Brilliance</div>
-            <div className="brand-sub">coder workbench · NEO MAX MTP</div>
+            <div className="brand-sub">coder workbench · Jumbo Fusion NEO MTP</div>
           </div>
         </div>
         <div className="model-chip" title={modelName}>

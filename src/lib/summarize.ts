@@ -14,7 +14,7 @@ import type { ChatMessage, ContinueMode } from "./types";
  */
 
 export const SUMMARY_SYSTEM = [
-  "You are the context compactor for Q38, a coding workbench running Qwen3.8-27B Turbo-Brilliance via llama-server.",
+  "You are the context compactor for Q38, a coding workbench running Qwen3.8-27B Jumbo Fusion Turbo-Brilliance via llama-server.",
   "You are given a transcript of earlier turns, oldest first, plus your own previous brief when one exists.",
   "Rewrite them into one dense handoff brief so the model can continue the session with no loss of working state.",
   "",

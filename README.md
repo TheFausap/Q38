@@ -1,6 +1,6 @@
 # Q38
 
-Coder workbench for [DavidAU’s Qwen3.8-27B Turbo-Brilliance](https://huggingface.co/DavidAU/Qwen3.8-27B-Turbo-Brilliance-50X-Reasoning-Instruct-NEO-MAX-MTP-GGUF) **NEO MAX MTP** GGUF, served by `llama-server`.
+Coder workbench for [DavidAU’s Qwen3.8-27B Jumbo Fusion IQ 747-900 Turbo-Brilliance](https://huggingface.co/DavidAU/Qwen3.8-27B-Jumbo-Fusion-IQ-747-900-Turbo-Brilliance-50X-Reasoning-Instruct-NEO-MAX-MTP-GGUF) **NEO MTP** GGUF, served by `llama-server`.
 
 The UI is built around Turbo Brilliance — 27 reasoning constructs, matching instruct variants, and the 9 combined `xhigh` modes — not a generic chat box with a model name taped on.
 
@@ -25,13 +25,15 @@ The UI is built around Turbo Brilliance — 27 reasoning constructs, matching in
 - Same-origin proxy so the browser never talks to `localhost` and CORS is not your problem
 - Offline demo stream if llama-server is down, so the workbench still exercises
 
-## MAX + llama-server
+## MTP + llama-server
 
-Use a **NEO MAX MTP** quant. MAX keeps the output tensor at BF16 and MTP tensors at Q8; that is what this UI assumes.
+Use a **NEO MTP** quant from the Jumbo Fusion repo (IQ2_M … Q8_0). Despite "MAX" in the repo name, its files match the size of the earlier non-MAX NEO-MTP quants, so don't count on a BF16 output tensor. The repo ships no mmproj; Q38 doesn't need one (document OCR goes to the separate OCR endpoint).
+
+The previous model, [Qwen3.8-27B Turbo-Brilliance NEO MAX MTP](https://huggingface.co/DavidAU/Qwen3.8-27B-Turbo-Brilliance-50X-Reasoning-Instruct-NEO-MAX-MTP-GGUF), still works unchanged: both GGUFs embed the same template structure and `{REASON:…}` construct keys.
 
 ```bash
 llama-server \
-  -m Qwen3.8-27B-Turbo-Brilliance-50X-RI-NEO-MAX-MTP-Q6_K.gguf \
+  -m Qwen3.8-27B-Jumbo-FIQ-747-900-T-Brill-50X-NEO-MTP-Q6_K.gguf \
   --alias q38-max \
   --host 0.0.0.0 --port 8080 \
   -c 65536 -ngl 99 -fa on --jinja \
@@ -46,7 +48,7 @@ very slow response times.
 
 ```bash
 llama-server \
-  -m Qwen3.8-27B-Turbo-Brilliance-50X-RI-NEO-MAX-MTP-Q4_K_M.gguf \
+  -m Qwen3.8-27B-Jumbo-FIQ-747-900-T-Brill-50X-NEO-MTP-Q4_K_M.gguf \
   --alias q38-max \
   --host 0.0.0.0 --port 8080 \
   -c 65536 \
@@ -60,8 +62,9 @@ llama-server \
 Notes from the model card:
 
 - Context **24k minimum**, **64k+** for real coding sessions (model max ~256k)
-- Higher quant → better construct fidelity. MAX > non-MAX. MTP is free speed if your llama.cpp build supports `--spec-type draft-mtp`
+- Higher quant → better construct fidelity (Q6+ for tool calling). MTP is free speed if your llama.cpp build supports `--spec-type draft-mtp`
 - **New chat** when you change construct; the workbench warns you
+- The Jumbo template prefixes most constructs (including `coder`) with a "follow exactly" core instruction, so system-prompt output rules are followed more strictly; it also fixes `{REASON:teacher}`, which pointed at a missing variable before
 - Help: `{REASON:help}` / `{REASON:ihelp}` / `{REASON:xhelp}`
 
 If your llama.cpp is older and rejects `--spec-type`, drop that flag. The GGUF still runs; you just lose the built-in draft head.
@@ -71,7 +74,7 @@ If your llama.cpp is older and rejects `--spec-type`, drop that flag. The GGUF s
 The workbench's tools — the archive `recall`, `web_search` / `web_fetch`, `skill_load` / `skill_search`, and `doc_add` / `doc_search` / `doc_read` — are **client-side**: the workbench sends an OpenAI `tools` array, the model asks for one, and the workbench does the work. llama-server only has to parse the model's tool call, and that is what `--jinja` is for:
 
 - **`--jinja`** — use the chat template inside the GGUF, which is what knows the model's tool-call delimiters. It is in the launch line above. Recent builds default it on (`--no-jinja` turns it off); older ones need it spelled out. Without it, llama-server ignores the `tools` array and the model describes the call in prose instead of making one.
-- **A tool-aware template is required, not just the flag.** Check `http://127.0.0.1:8080/props` — the model should report `chat_template_tool_use`; the **Server** tab warns when the loaded template never mentions tools, and lists the tools sent on the last turn. Keep the template that ships in the Turbo-Brilliance GGUF: it is heavily customised (it is what implements the `{REASON:…}` constructs), so swapping in the stock Qwen 3.8 template or `chatml` loses the constructs. Its tool support is Qwen's `<tool_call><function=…>` form.
+- **A tool-aware template is required, not just the flag.** Check `http://127.0.0.1:8080/props` — the model should report `chat_template_tool_use`; the **Server** tab warns when the loaded template never mentions tools, and lists the tools sent on the last turn. Keep the template that ships in the GGUF: it is heavily customised (it is what implements the `{REASON:…}` constructs), so swapping in the stock Qwen 3.8 template or `chatml` loses the constructs. Its tool support is Qwen's `<tool_call><function=…>` form.
 - **`--tools` / `--agent` are a different thing and you do not want them here.** Those enable *llama-server's own* built-in tools (`read_file`, `write_file`, `grep_search`, `exec_shell_command`, …) for its web UI. They are not needed for the workbench's tools, they expose file and shell access over the API, and llama.cpp's own README says not to enable them in an untrusted environment.
 - The workbench does not ask for `parallel_tool_calls`; if a round still carries several calls, they are run one after another.
 
@@ -455,7 +458,7 @@ Scratch output lands in `tests/.bundle` and `tests/.tmp`, both ignored.
 
 ## Context: budget, memory, continuation
 
-MAX MTP burns context quickly — 64k is a real session, not a lot of one. The
+Reasoning plus MTP burns context quickly — 64k is a real session, not a lot of one. The
 workbench measures the window, folds the older turns into a brief, and resumes a
 reply that was cut off mid-code.
 
