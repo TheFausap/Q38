@@ -1,0 +1,15 @@
+.git
+node_modules
+dist
+skills
+tests/.bundle
+tests/.tmp
+*.tsbuildinfo
+.vite
+.DS_Store
+*.local
+.env
+.env.*
+Dockerfile
+compose.yaml
+.dockerignore

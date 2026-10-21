@@ -134,6 +134,22 @@ npm start
 
 Then open the URL it prints — not the old `serve` port.
 
+### In a container
+
+`Dockerfile` and `compose.yaml` run the built workbench (`server/prod.mjs`) on port 4173.
+llama-server, OCR, embeddings and SearXNG are not in the image; the container reaches them over the network.
+
+```bash
+cp .env.example .env          # optional: headless defaults for the URLs and keys
+docker compose up -d --build
+docker compose run --rm q38 npm run skills:sync   # once, to fill the skills volume
+```
+
+- **Network.** On Linux the compose file uses host networking. The container shares the machine's network, so `http://127.0.0.1:8080` in Setup still reaches llama-server. On Docker Desktop, or to keep the container isolated, use the bridge variant at the bottom of `compose.yaml` and point every URL in Setup at `host.docker.internal` instead of `127.0.0.1`.
+- **Data.** Chats, settings, memory and the library go in the `q38-data` volume (`/data`). Skills go in `q38-skills` (`/skills`). `./workspace` is bind-mounted, so files from drops, `github/` saves and the model's `model/` writes show up on the host. The container runs as uid 1000, so the bind-mounted `./workspace` must be writable by uid 1000 on the host.
+- **GitHub.** The image includes `gh` and mounts `~/.config/gh` read-only. You can set `GH_TOKEN` in `.env` instead. Build with `--build-arg WITH_GH=0` to leave `gh` out.
+- **Architecture.** The image builds natively on amd64 and arm64.
+
 ### Where your chats and settings live
 
 On the **server's disk**, not in the browser: `<state>/ui` (`~/.local/share/q38/ui`,

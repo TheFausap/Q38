@@ -1,0 +1,56 @@
+# Q38 in a container.
+#
+#   docker compose up -d --build
+#   open http://localhost:4173
+#
+# Host networking (the default here, Linux only): the container shares the
+# machine's network, so llama-server, SearXNG and anything else on this box
+# are still at 127.0.0.1 — the URLs already in Q38's settings keep working.
+# For Docker Desktop (macOS/Windows) or an isolated network, see the bridge
+# variant at the bottom.
+
+services:
+  q38:
+    build: .
+    image: q38:latest
+    container_name: q38
+    restart: unless-stopped
+    init: true
+    network_mode: host
+    env_file:
+      - path: .env          # optional: copy .env.example to .env and fill it in
+        required: false
+    environment:
+      # these win over .env: the paths are where the volumes below are mounted
+      PORT: ${Q38_PORT:-4173}
+      WORKSPACE_DIR: /workspace
+      Q38_SKILLS_DIR: /skills
+      Q38_STATE_DIR: /data
+      Q38_LIBRARY_DIR: /data/library
+    volumes:
+      # chats, settings, memory archive and the document library
+      - q38-data:/data
+      # the workspace: your files, github/ saves, and model/ (workspace_write)
+      - ./workspace:/workspace
+      # skills (procedure manuals): fill once with
+      #   docker compose run --rm q38 npm run skills:sync
+      - q38-skills:/skills
+      # gh's login, read-only; or set GH_TOKEN in .env instead
+      - ${HOME}/.config/gh:/home/node/.config/gh:ro
+
+volumes:
+  q38-data:
+  q38-skills:
+
+# ---------------------------------------------------------------- bridge variant
+# Replace `network_mode: host` with:
+#
+#    ports:
+#      - "4173:4173"
+#    extra_hosts:
+#      - "host.docker.internal:host-gateway"
+#
+# and set LLAMA_SERVER_URL=http://host.docker.internal:8080 in .env. Then in
+# Q38, Setup → llama-server URL (and the OCR, embeddings and SearXNG URLs) must
+# use host.docker.internal instead of 127.0.0.1: inside the container,
+# 127.0.0.1 is the container itself.
