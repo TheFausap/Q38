@@ -23,6 +23,7 @@ const PURPOSE: Record<string, string> = {
   github_search: "search GitHub code or repositories",
   github_tree: "list a GitHub repository's files",
   github_read: "read a file from a GitHub repository, a slice of lines at a time",
+  workspace_write: "write a text file into the user's workspace (under model/)",
 };
 
 export function toolNames(tools: unknown[] | undefined): string[] {
@@ -44,6 +45,7 @@ export function toolBriefing(tools: unknown[] | undefined): string {
   const can: string[] = [];
   if (has("web_search") || has("web_fetch")) can.push("you DO have internet access through web_search and web_fetch");
   if (has("github_read")) can.push("you CAN read GitHub repositories — public and the user's private ones — through github_tree and github_read");
+  if (has("workspace_write")) can.push("you CAN write files into the user's workspace through workspace_write");
   if (has("doc_add")) can.push("you CAN download and read PDFs and papers through doc_add, then doc_search and doc_read");
   if (can.length) {
     lines.push(
@@ -63,6 +65,13 @@ export function toolBriefing(tools: unknown[] | undefined): string {
       "To work from a repository: github_tree to see its layout, then github_read the files you need; " +
         "a long file comes back in slices, so read on with the line it gives you instead of guessing the rest. " +
         "Cite files as owner/repo/path:line. When the user wants to keep or work on a file, github_read it with save: true.",
+    );
+  }
+  if (has("workspace_write")) {
+    lines.push(
+      "When the user asks you to write, save or create a file, call workspace_write with the whole file as content " +
+        "instead of only showing it in your reply; then say where it went (./workspace/model/<path>). " +
+        "To change a file you wrote earlier, write it again with mode overwrite.",
     );
   }
   return lines.join("\n");

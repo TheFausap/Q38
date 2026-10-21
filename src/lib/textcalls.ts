@@ -39,6 +39,8 @@ const ALIASES: Record<string, string[]> = {
   line: ["start_line", "from_line", "line_number", "lineno", "start", "offset"],
   kind: ["type", "search_type"],
   save: ["keep", "store", "download", "save_to_workspace"],
+  content: ["text", "body", "contents", "data", "code", "file_content", "file_contents", "source"],
+  mode: ["write_mode", "action", "how"],
 };
 
 function schemaOf(tools: unknown[], name: string): Schema | null {

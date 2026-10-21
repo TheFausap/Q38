@@ -12,6 +12,7 @@ import type {
 import type { WebPageOutcome, WebSearchOutcome } from "./web";
 import type { SkillIndex, SkillReadOutcome, SkillSearchOutcome } from "./skills";
 import type { AddOutcome, LibraryJob, LibraryList, ReadOutcome, SearchOutcome } from "./library";
+import type { WorkspaceWriteOutcome } from "./workspace";
 
 export type StreamHandlers = {
   onReasoning: (chunk: string) => void;
@@ -701,6 +702,30 @@ export async function githubCall<T>(op: "tree" | "read" | "search" | "save", bod
     }
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) } as T;
+  }
+}
+
+/** The model's workspace_write, through the server; never throws, always an outcome. */
+export async function workspaceWriteCall(body: {
+  path: string;
+  content: string;
+  mode?: string;
+}): Promise<WorkspaceWriteOutcome> {
+  if (proxyDead) return { ok: false, error: "writing to the workspace needs npm run dev or npm start" };
+  try {
+    const res = await fetch("/api/workspace/write", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const text = await res.text();
+    try {
+      return JSON.parse(text) as WorkspaceWriteOutcome;
+    } catch {
+      return { ok: false, error: `the workbench answered ${res.status} with something that is not JSON` };
+    }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
 

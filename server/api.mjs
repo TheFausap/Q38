@@ -10,6 +10,7 @@ import { currentIndex, publicIndex, readSkill, searchSkills } from "./skills.mjs
 import { writeDurable, writeJsonDurable } from "./durable.mjs";
 import { loadAll, saveDocs } from "./store.mjs";
 import { githubRead, githubSave, githubSearch, githubStatus, githubTree } from "./github.mjs";
+import { workspaceWrite, WS_WRITE_MAX_BYTES } from "./workspace-write.mjs";
 
 const SKIP_DIRS = new Set([
   "node_modules",
@@ -1385,6 +1386,22 @@ export function createApi() {
         const unique = uniqueName(root, name);
         writeDurable(path.join(root, unique.name), payload.content);
         sendJson(res, 200, { path: unique.name, size: bytes, renamed: unique.renamed });
+        return;
+      }
+
+      /* the model's writes — confined to ./workspace/model (server/workspace-write.mjs) */
+      if (url.pathname === "/api/workspace/write" && req.method === "POST") {
+        let payload;
+        try {
+          payload = JSON.parse((await readBodyCapped(req, WS_WRITE_MAX_BYTES + 64_000)).toString("utf8") || "{}");
+        } catch (err) {
+          sendJson(res, err?.statusCode || 400, {
+            ok: false,
+            error: err?.statusCode === 413 ? "the content is over the size limit" : "the body is not JSON",
+          });
+          return;
+        }
+        sendJson(res, 200, workspaceWrite(payload && typeof payload === "object" ? payload : {}, workspaceRoot()));
         return;
       }
 

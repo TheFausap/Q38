@@ -12,7 +12,7 @@
     "serve": "node server/prod.mjs",
     "test": "npm run test:unit && npm run test:server && npm run test:ui",
     "test:unit": "node --no-warnings --experimental-strip-types tests/memory.test.ts && node --no-warnings --experimental-strip-types tests/web.test.ts && node --no-warnings --experimental-strip-types tests/skills.test.ts && node --no-warnings --experimental-strip-types tests/library.test.ts && node --no-warnings --experimental-strip-types tests/toolbrief.test.ts && node --no-warnings --experimental-strip-types tests/textcalls.test.ts && node --no-warnings --experimental-strip-types tests/markdown.test.ts && node --no-warnings --import ./tests/ts-resolve.mjs --experimental-strip-types tests/storage.test.ts && node --no-warnings --import ./tests/ts-resolve.mjs --experimental-strip-types tests/github.test.ts",
-    "test:server": "node tests/store-routes.mjs && node tests/github-routes.mjs && node tests/web-routes.mjs && node tests/skills-routes.mjs && node tests/library-routes.mjs",
+    "test:server": "node tests/store-routes.mjs && node tests/github-routes.mjs && node tests/workspace-write-routes.mjs && node tests/web-routes.mjs && node tests/skills-routes.mjs && node tests/library-routes.mjs",
     "test:ui": "vite build --config tests/vite.ui-test.config.ts --ssr tests/ui-test-entry.tsx --logLevel warn && node tests/ui.mjs",
     "skills:sync": "node scripts/sync-skills.mjs"
   },
@@ -23,8 +23,10 @@
     "highlight.js": "^11.12.0",
     "katex": "^0.19.0",
     "pdfjs-dist": "5.4.394",
+    "present": "^1.0.0",
     "react": "^19.3.0",
-    "react-dom": "^19.3.0"
+    "react-dom": "^19.3.0",
+    "scripts": "^0.1.0"
   },
   "devDependencies": {
     "@types/react": "^19.3.0",
@@ -33,5 +35,8 @@
     "jsdom": "^30.1.2",
     "typescript": "^7.0.2",
     "vite": "^8.3.4"
+  },
+  "allowScripts": {
+    "fsevents@2.3.3": true
   }
 }

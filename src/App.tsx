@@ -31,7 +31,7 @@ import {
   webFetchPage,
   webSearch,
 } from "./lib/api";
-import { githubCall, githubStatusCheck } from "./lib/api";
+import { githubCall, githubStatusCheck, workspaceWriteCall } from "./lib/api";
 import type { OcrInfo, WireMessage } from "./lib/api";
 import {
   GH_MAX_CHARS,
@@ -51,6 +51,12 @@ import {
   type GithubStatus,
   type GithubTreeOutcome,
 } from "./lib/github";
+import {
+  WORKSPACE_TOOLS,
+  WS_MAX_WRITES_PER_TURN,
+  writeNotice as workspaceWriteNotice,
+  writeText as workspaceWriteText,
+} from "./lib/workspace";
 import {
   activeCompaction,
   cutIdOf,
@@ -1452,6 +1458,34 @@ export function App() {
     [settings.githubChars, refreshTree],
   );
 
+  /** The model's workspace_write: one text file under ./workspace/model, then the tree refreshed. */
+  const workspaceWriteForTool = useCallback(
+    async (call: { name: string; arguments: string }) => {
+      const a = argsOf(call.arguments);
+      const path = String(a.path ?? "").trim();
+      const mode = typeof a.mode === "string" ? a.mode : undefined;
+      if (typeof a.content !== "string") {
+        return workspaceWriteText({ path }, { ok: false, error: "content is missing — pass the file's text as content" });
+      }
+      setWebActive({ kind: "open", label: `write ${path || "file"}` });
+      /* text-form calls arrive trimmed: end every write on a newline, as a text file should */
+      const content = a.content && !a.content.endsWith("\n") ? `${a.content}\n` : a.content;
+      const out = await workspaceWriteCall({ path, content, mode });
+      setWebActive(null);
+      setDropNotice(workspaceWriteNotice(out, path));
+      if (out.ok) {
+        void refreshTree();
+        /* a file the user already pinned is refreshed in place, so the next turn sees the new text */
+        if (out.path && out.content !== undefined) {
+          const pin = { path: out.path, content: out.content };
+          setAttachments((cur) => cur.map((x) => (x.path === pin.path ? { ...x, content: pin.content } : x)));
+        }
+      }
+      return workspaceWriteText({ path }, out);
+    },
+    [refreshTree],
+  );
+
   /** The sidebar's "from GitHub" box: save one file into ./workspace and pin it. */
   const saveFromGithub = useCallback(
     async (target: string) => {
@@ -1938,6 +1972,7 @@ export function App() {
       github_search: GH_MAX_SEARCHES_PER_TURN,
       github_tree: GH_MAX_TREES_PER_TURN,
       github_read: GH_MAX_READS_PER_TURN,
+      workspace_write: WS_MAX_WRITES_PER_TURN,
     };
     const used: Record<string, number> = {};
     const sources: { title: string; url: string }[] = [];
@@ -2002,6 +2037,10 @@ export function App() {
           sources.push(...r.sources);
           stats.opened = call.name === "github_read" ? 1 : 0;
           stats.searched = call.name === "github_search" ? 1 : 0;
+          break;
+        }
+        case "workspace_write": {
+          text = await workspaceWriteForTool(call);
           break;
         }
         default:
@@ -2385,6 +2424,7 @@ export function App() {
     if (archivesOf(target).length > 0 && settings.recallTool) offered.push(RECALL_TOOL);
     if (settings.webSearch) offered.push(...WEB_TOOLS);
     if (settings.github && ghStatus?.ok) offered.push(...GITHUB_TOOLS);
+    if (settings.workspaceWrite) offered.push(...WORKSPACE_TOOLS);
     if (settings.skills) offered.push(...skillTools(skills));
     if (settings.library) offered.push(...libraryTools(libDocs ?? [], { ocr: Boolean(settings.ocrUrl.trim()) }));
     const tools: unknown[] | undefined = offered.length ? offered : undefined;
@@ -3085,6 +3125,21 @@ function SettingsModal({
               })
             }
           />
+        </label>
+        <div className="group-label">Workspace writes</div>
+        <p className="hint">
+          The model can write text files with <code>workspace_write</code>. They land only in{" "}
+          <code>./workspace/model/</code> — it can create, replace and append to files there, and
+          cannot touch anything else in the workspace. Up to {WS_MAX_WRITES_PER_TURN} writes a turn,
+          2 MB a file.
+        </p>
+        <label className="tiny-check block">
+          <input
+            type="checkbox"
+            checked={settings.workspaceWrite}
+            onChange={(e) => onChange({ ...settings, workspaceWrite: e.target.checked })}
+          />
+          let the model write files into ./workspace/model
         </label>
         <div className="group-label">Library &amp; skills</div>
         <p className="hint">
