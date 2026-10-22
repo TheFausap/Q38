@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { createEmbedder, createLibrary, LIBRARY_MAX_BYTES } from "./library.mjs";
 import { createOcr } from "./ocr.mjs";
+import { findImage, IMAGE_MAX_BYTES, putImage } from "./images.mjs";
 import { currentIndex, publicIndex, readSkill, searchSkills } from "./skills.mjs";
 import { writeDurable, writeJsonDurable } from "./durable.mjs";
 import { loadAll, saveDocs } from "./store.mjs";
@@ -1748,6 +1749,38 @@ export function createApi() {
           payload = null;
         }
         await streamDemo(res, payload);
+        return;
+      }
+
+      /* images attached to chat turns (server/images.mjs) */
+      if (url.pathname === "/api/images" && req.method === "POST") {
+        let raw;
+        try {
+          raw = await readBodyCapped(req, IMAGE_MAX_BYTES);
+        } catch (err) {
+          sendJson(res, err?.statusCode || 413, { ok: false, error: err instanceof Error ? err.message : String(err) });
+          return;
+        }
+        const out = putImage(stateRoot(), raw);
+        sendJson(res, out.error ? 400 : 200, out.error ? { ok: false, error: out.error } : { ok: true, ...out });
+        return;
+      }
+
+      if (url.pathname.startsWith("/api/images/") && (req.method === "GET" || req.method === "HEAD")) {
+        const found = findImage(stateRoot(), url.pathname.slice("/api/images/".length));
+        if (!found) {
+          sendJson(res, 404, { error: "no such image" });
+          return;
+        }
+        const stat = fs.statSync(found.file);
+        res.writeHead(200, {
+          "content-type": found.mime,
+          "content-length": String(stat.size),
+          /* the id is the hash of the bytes, so they can never change */
+          "cache-control": "private, max-age=31536000, immutable",
+        });
+        if (req.method === "HEAD") res.end();
+        else fs.createReadStream(found.file).pipe(res);
         return;
       }
 

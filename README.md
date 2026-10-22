@@ -22,12 +22,13 @@ The UI is built around Turbo Brilliance — 27 reasoning constructs, matching in
 - **Reply continuation**: a reply cut off by `max_tokens` resumes itself, mid-code-block included
 - **Job console**: a punched-card readout for the slow parts — model loading, prompt reading, and weights paging back in after idle
 - KaTeX for LaTeX: `$$...$$`, `$...$`, `\[...\]`, `\(...\)`, and `align`/`equation` environments — the model is told so in every prompt, and asked to write formulas (including ones quoted from a document) as LaTeX rather than Unicode in backticks; code spans are never formatted or read as maths
+- **Images**: paste, drop or pick pictures into the composer; they go to the model as image parts when llama-server runs with `--mmproj`
 - Same-origin proxy so the browser never talks to `localhost` and CORS is not your problem
 - Offline demo stream if llama-server is down, so the workbench still exercises
 
 ## MTP + llama-server
 
-Use a **NEO MTP** quant from the Jumbo Fusion repo (IQ2_M … Q8_0). Despite "MAX" in the repo name, its files match the size of the earlier non-MAX NEO-MTP quants, so don't count on a BF16 output tensor. The repo ships no mmproj; Q38 doesn't need one (document OCR goes to the separate OCR endpoint).
+Use a **NEO MTP** quant from the Jumbo Fusion repo (IQ2_M … Q8_0). Despite "MAX" in the repo name, its files match the size of the earlier non-MAX NEO-MTP quants, so don't count on a BF16 output tensor. The repo ships no mmproj. Q38 works without one; add one only if you want to send pictures in chat (see [Images](#images)). Document OCR goes to the separate OCR endpoint either way.
 
 The previous model, [Qwen3.8-27B Turbo-Brilliance NEO MAX MTP](https://huggingface.co/DavidAU/Qwen3.8-27B-Turbo-Brilliance-50X-Reasoning-Instruct-NEO-MAX-MTP-GGUF), still works unchanged: both GGUFs embed the same template structure and `{REASON:…}` construct keys.
 
@@ -172,6 +173,31 @@ Files are created `0600` (settings hold API keys). An unreadable file is set asi
 `*.corrupt-<time>` rather than deleted. On macOS, fsync flushes to the drive but not
 through the drive's own cache (that needs `F_FULLFSYNC`, which Node does not expose);
 on Linux it reaches stable storage.
+
+## Images
+
+Start llama-server with the vision projector next to the model:
+
+```bash
+llama-server -m <model>.gguf --mmproj mmproj-<model>.gguf --jinja ...
+```
+
+Then paste a screenshot into the composer, drop image files on it, or use the
+**image** button. Each picture is decoded in the browser, scaled down to
+Setup → *image size* (1 MP by default) and re-encoded as PNG (screenshots, GIF, BMP)
+or JPEG (photos); WebP and the like are converted, since llama-server's loader does
+not read them. The bytes are stored on the server by hash, in `<state>/ui/images/`,
+and the message keeps only a reference, so a conversation file stays small while it
+is rewritten during a stream. Pictures go with that one turn; the thumbnail in the
+composer shows the size and an estimate of the tokens it will cost (about one per
+28×28 px), and the context meter counts it.
+
+On the wire a turn with pictures is OpenAI-style parts: the images as
+`image_url` data URLs, then the text. Turns without pictures stay plain strings.
+If `/props` says the server has no vision (no `--mmproj`), the composer warns before
+you send. A fold keeps the picture's name and size in the brief, not the picture.
+With no Q38 server in reach (a static host), a picture is carried inside the message
+as a data URL instead, and the thumbnail is outlined to say so.
 
 ## Web search
 
@@ -406,7 +432,7 @@ or `Q38_LIBRARY_DIR`: `docs/<id>/` holds the original file, `chunks.json`, `meta
 ```bash
 npm test             # everything
 npm run test:unit    # pure logic: memory rules, web, skill and library tool text, the tool briefing, text tool calls, markdown  (no DOM, no network)
-npm run test:server  # the store, web, skill and library routes over real HTTP against stubs and fixtures
+npm run test:server  # the store, web, skill, library and image routes over real HTTP against stubs and fixtures
 npm run test:ui      # the whole workbench in jsdom, against a stub model
 ```
 
