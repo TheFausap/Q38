@@ -87,9 +87,10 @@ export function buildSummaryMaterial(
   for (const m of tailFirst) {
     if (m === firstUser) continue;
     const body = clean(m.content);
-    const attachments = (m.attachments ?? [])
-      .map((a) => `  pinned file: ${a.path} (${a.content.length} chars)`)
-      .join("\n");
+    const attachments = [
+      ...(m.attachments ?? []).map((a) => `  pinned file: ${a.path} (${a.content.length} chars)`),
+      ...(m.images ?? []).map((img) => `  image: ${img.name} (${img.width}×${img.height}; not carried into the brief)`),
+    ].join("\n");
     if (!body && !attachments) continue;
     const header = m.role === "user" ? "### user" : "### assistant";
     const block = [header, clip(body || "(no text)", perMessage), attachments].filter(Boolean).join("\n");

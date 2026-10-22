@@ -4,6 +4,7 @@ import { Inspector, type InspectorTab } from "./components/Inspector";
 import { Sidebar } from "./components/Sidebar";
 import {
   buildWireMessages,
+  wireText,
   completeOnce,
   countTokens,
   fetchFile,
@@ -172,6 +173,7 @@ import type {
   Compaction,
   FileNode,
   FinishInfo,
+  ImageRef,
   ModeFamily,
   PromptProgress,
   Sampling,
@@ -180,6 +182,7 @@ import type {
   Settings,
 } from "./lib/types";
 import { DEFAULT_SETTINGS } from "./lib/types";
+import { attachImage, visionFromProps } from "./lib/images";
 
 function blankSession(modeId: string, family: ModeFamily): Session {
   const now = Date.now();
@@ -294,6 +297,10 @@ export function App() {
   const [activeId, setActiveId] = useState(() => loadActiveId() || sessions[0]?.id);
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  /** pictures for the next turn only; they go with it and are cleared */
+  const [images, setImages] = useState<ImageRef[]>([]);
+  const [imageBusy, setImageBusy] = useState(0);
+  const [imageNotice, setImageNotice] = useState<string | null>(null);
   const [tree, setTree] = useState<FileNode[]>([]);
   const [status, setStatus] = useState<ServerStatus | null>(null);
   const [streamingId, setStreamingId] = useState<string | null>(null);
@@ -710,6 +717,8 @@ export function App() {
     setActiveId(s.id);
     setDraft("");
     setAttachments([]);
+    setImages([]);
+    setImageNotice(null);
     setDemoNotice(false);
     setModeWarn(null);
     setFoldNotice(null);
@@ -1516,7 +1525,7 @@ export function App() {
     const wire = buildWireMessages(unfoldedMessages(target.messages, c), settings, {
       systemExtra: c ? [compactionBriefText(c)] : [],
     });
-    const n = await countTokens(wire.map((m) => `${m.role}: ${m.content}`).join("\n"), settings);
+    const n = await countTokens(wire.map((m) => `${m.role}: ${wireText(m.content)}`).join("\n"), settings);
     setExactTokens(n);
     if (n === null) setFoldNotice("llama-server /tokenize is not answering — the estimate stands.");
   }, [currentSession, settings]);
@@ -2344,11 +2353,38 @@ export function App() {
     return { wire, systemExtra };
   };
 
+  /** Pictures dropped, pasted or picked: scaled, stored, and queued for the next turn. */
+  const addImages = async (files: File[]) => {
+    const pics = files.filter((f) => f.type.startsWith("image/"));
+    if (!pics.length) return;
+    setImageNotice(null);
+    setImageBusy((n) => n + pics.length);
+    const failed: string[] = [];
+    let inline = false;
+    for (const f of pics) {
+      try {
+        const ref = await attachImage(f, settings.imageMegapixels);
+        if (ref.data) inline = true;
+        setImages((cur) => (cur.some((x) => x.id === ref.id) ? cur : [...cur, ref]));
+      } catch (err) {
+        failed.push(err instanceof Error ? err.message : String(err));
+      } finally {
+        setImageBusy((n) => n - 1);
+      }
+    }
+    if (failed.length) setImageNotice(failed.join(" · "));
+    else if (inline) setImageNotice("The Q38 server is out of reach, so the image is carried inside the conversation.");
+  };
+
   const send = async (text?: string, regen = false) => {
     const target = currentSession();
     if (!target) return;
     const raw = (text ?? draft).trim();
-    if (!raw && attachments.length === 0 && !regen) return;
+    if (!raw && attachments.length === 0 && images.length === 0 && !regen) return;
+    if (imageBusy > 0 && !regen) {
+      setImageNotice("Still preparing an image — send again in a moment.");
+      return;
+    }
     const ctrl = new AbortController();
     const prev = abortRef.current;
     abortRef.current = ctrl;
@@ -2402,6 +2438,7 @@ export function App() {
           role: "user",
           content,
           attachments: attachments.length ? attachments : undefined,
+          images: images.length ? images : undefined,
           modeTag: tag,
         };
 
@@ -2448,6 +2485,8 @@ export function App() {
     }));
     if (!regen) {
       setDraft("");
+      setImages([]);
+      setImageNotice(null);
     }
     setStreamingId(asst.id);
 
@@ -2813,6 +2852,12 @@ export function App() {
           streamingId={streamingId}
           attachments={attachments}
           onDetach={(p) => setAttachments((a) => a.filter((x) => x.path !== p))}
+          images={images}
+          imageBusy={imageBusy}
+          imageNotice={imageNotice}
+          vision={visionFromProps(status?.props)}
+          onAddImages={(files) => void addImages(files)}
+          onRemoveImage={(id) => setImages((cur) => cur.filter((x) => x.id !== id))}
           draft={draft}
           setDraft={setDraft}
           onSend={() => void send()}
@@ -3000,6 +3045,19 @@ function SettingsModal({
               onChange({ ...settings, contextSize: Math.max(0, Number(e.target.value) || 0) })
             }
             placeholder="0"
+          />
+        </label>
+        <label className="field">
+          <span>image size (megapixels — attached pictures are scaled down to this)</span>
+          <input
+            type="number"
+            min={0.25}
+            max={8}
+            step={0.25}
+            value={settings.imageMegapixels}
+            onChange={(e) =>
+              onChange({ ...settings, imageMegapixels: Math.max(0.25, Math.min(8, Number(e.target.value) || 1)) })
+            }
           />
         </label>
         <label className="field">

@@ -13,6 +13,7 @@ import type { WebPageOutcome, WebSearchOutcome } from "./web";
 import type { SkillIndex, SkillReadOutcome, SkillSearchOutcome } from "./skills";
 import type { AddOutcome, LibraryJob, LibraryList, ReadOutcome, SearchOutcome } from "./library";
 import type { WorkspaceWriteOutcome } from "./workspace";
+import { ensureImageData, imageDataUrl } from "./images";
 
 export type StreamHandlers = {
   onReasoning: (chunk: string) => void;
@@ -367,9 +368,14 @@ export async function countTokens(text: string, settings: Settings): Promise<num
 }
 
 export type WireToolCall = { id: string; type: "function"; function: { name: string; arguments: string } };
+export type WireContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
 export type WireMessage = {
   role: string;
-  content: string;
+  /** a plain string, or text + image parts for a turn that carries pictures */
+  content: string | WireContentPart[];
   /** the model's thinking for this message; Qwen templates render it inside <think> */
   reasoning_content?: string;
   tool_calls?: WireToolCall[];
@@ -385,6 +391,14 @@ export const RENDERING_NOTE =
   "Replies are rendered as Markdown with KaTeX. Write mathematics as LaTeX — $...$ inline, $$...$$ on its own lines for display — " +
   "never in backticks or as Unicode look-alikes (σ̃, ᵀ, ∈ typed as text). When you quote a formula from a document, transcribe it " +
   "into LaTeX faithfully, symbol for symbol. Backticks are for code, identifiers and file names only.";
+
+/** The words of a wire message, images left out — for token counts and logs. */
+export function wireText(content: WireMessage["content"]): string {
+  if (typeof content === "string") return content;
+  return content
+    .map((p) => (p.type === "text" ? p.text : "[image]"))
+    .join("\n");
+}
 
 export function buildWireMessages(
   messages: ChatMessage[],
@@ -409,6 +423,21 @@ export function buildWireMessages(
         .map((a) => `### Context: ${a.path}\n\`\`\`\n${a.content}\n\`\`\``)
         .join("\n\n");
       content = `${content}\n\n${blocks}`;
+    }
+    if (m.role === "user" && m.images?.length) {
+      /* OpenAI-style parts; llama-server hands the image_url parts to the
+         --mmproj projector. Pictures go first, then the words about them. */
+      const parts: WireContentPart[] = [];
+      const lost: string[] = [];
+      for (const img of m.images) {
+        const url = imageDataUrl(img);
+        if (url) parts.push({ type: "image_url", image_url: { url } });
+        else lost.push(img.name);
+      }
+      if (lost.length) content = `${content}\n\n(attached image${lost.length > 1 ? "s" : ""} not available: ${lost.join(", ")})`;
+      if (content.trim()) parts.push({ type: "text", text: content });
+      out.push({ role: m.role, content: parts.length ? parts : content });
+      continue;
     }
     out.push({ role: m.role, content });
   }
@@ -895,6 +924,8 @@ export async function streamChat(
   signal: AbortSignal,
   opts: ChatStreamOptions = {},
 ): Promise<StreamOutcome> {
+  /* pictures are referenced by id in the transcript; fetch their bytes once */
+  await ensureImageData(messages);
   const payload = buildChatPayload(messages, sampling, settings, opts);
   const waitForModel = opts.waitForModel !== false;
   const modelWaitMs = opts.modelWaitMs ?? 20 * 60_000;

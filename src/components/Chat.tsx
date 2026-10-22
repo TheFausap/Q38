@@ -5,7 +5,8 @@ import { isBusyPhase } from "../lib/pacing";
 import { JobConsole, type PacingView } from "./Punchcard";
 import { fenceState } from "../lib/summarize";
 import { ArchiveCard } from "./Memory";
-import type { ArchiveRef, Attachment, ChatMessage, Compaction, ModeFamily, Session } from "../lib/types";
+import type { ArchiveRef, Attachment, ChatMessage, Compaction, ImageRef, ModeFamily, Session } from "../lib/types";
+import { ACCEPTED_IMAGE_TYPES, imageSrc, imageTokens } from "../lib/images";
 import { MarkdownView } from "./MarkdownView";
 import { stripToolMarkup } from "../lib/textcalls";
 import type { RoundTrace } from "../lib/types";
@@ -17,6 +18,12 @@ export function Chat({
   streamingId,
   attachments,
   onDetach,
+  images,
+  imageBusy,
+  imageNotice,
+  vision,
+  onAddImages,
+  onRemoveImage,
   draft,
   setDraft,
   onSend,
@@ -49,6 +56,13 @@ export function Chat({
   streamingId: string | null;
   attachments: Attachment[];
   onDetach: (path: string) => void;
+  images: ImageRef[];
+  imageBusy: number;
+  imageNotice: string | null;
+  /** /props modalities.vision: true with --mmproj, false without, null if unknown */
+  vision: boolean | null;
+  onAddImages: (files: File[]) => void;
+  onRemoveImage: (id: string) => void;
   draft: string;
   setDraft: (s: string) => void;
   onSend: () => void;
@@ -78,6 +92,17 @@ export function Chat({
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const area = useRef<HTMLTextAreaElement>(null);
+  const picker = useRef<HTMLInputElement>(null);
+  const [dragging, setDragging] = useState(false);
+  const imageFiles = (list: FileList | DataTransferItemList | null | undefined): File[] => {
+    const out: File[] = [];
+    if (!list) return out;
+    for (const item of Array.from(list as ArrayLike<File | DataTransferItem>)) {
+      const f = item instanceof File ? item : item.kind === "file" ? item.getAsFile() : null;
+      if (f && f.type.startsWith("image/")) out.push(f);
+    }
+    return out;
+  };
   const mode = modeById(session.modeId);
   const tag = reasonTag(family, session.modeId);
 
@@ -233,7 +258,25 @@ export function Chat({
         })}
       </div>
 
-      <div className="composer">
+      <div
+        className={`composer ${dragging ? "dragging" : ""}`}
+        onDragOver={(e) => {
+          if (!Array.from(e.dataTransfer.types).includes("Files")) return;
+          e.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={(e) => {
+          if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+          setDragging(false);
+        }}
+        onDrop={(e) => {
+          const files = imageFiles(e.dataTransfer.files);
+          setDragging(false);
+          if (!files.length) return;
+          e.preventDefault();
+          onAddImages(files);
+        }}
+      >
         {pacing && retro && pacing.phase === "paging" && <JobConsole view={pacing} compact />}
         {/* The model stopped talking to go and look something up. Without this the
             turn reads as stalled exactly while it is working hardest. */}
@@ -263,8 +306,36 @@ export function Chat({
             ))}
           </div>
         )}
+        {(images.length > 0 || imageBusy > 0) && (
+          <div className="thumbs">
+            {images.map((img) => (
+              <figure key={img.id} className={`thumb ${img.data ? "unstored" : ""}`}>
+                <img src={imageSrc(img)} alt={img.name} />
+                <figcaption title={img.name}>
+                  {img.width}×{img.height} · ~{imageTokens(img)} tok
+                </figcaption>
+                <button type="button" className="thumb-x" onClick={() => onRemoveImage(img.id)} aria-label={`Remove ${img.name}`}>
+                  ×
+                </button>
+              </figure>
+            ))}
+            {imageBusy > 0 && <div className="thumb pending">preparing…</div>}
+          </div>
+        )}
+        {(images.length > 0 || imageBusy > 0) && vision === false && (
+          <div className="image-warn" role="alert">
+            llama-server reports no vision: start it with <code>--mmproj</code> or the pictures will be refused.
+          </div>
+        )}
+        {imageNotice && <div className="image-warn">{imageNotice}</div>}
         <textarea
           ref={area}
+          onPaste={(e) => {
+            const files = imageFiles(e.clipboardData?.items);
+            if (!files.length) return;
+            e.preventDefault();
+            onAddImages(files);
+          }}
           value={draft}
           placeholder={`${tag} ${mode.example}`}
           onChange={(e) => setDraft(e.target.value)}
@@ -287,12 +358,36 @@ export function Chat({
                 : " · auto-fold off"}
           </span>
           <span className="grow" />
+          <input
+            ref={picker}
+            type="file"
+            accept={ACCEPTED_IMAGE_TYPES}
+            multiple
+            hidden
+            onChange={(e) => {
+              const files = imageFiles(e.target.files);
+              e.target.value = "";
+              if (files.length) onAddImages(files);
+            }}
+          />
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => picker.current?.click()}
+            title={
+              vision === false
+                ? "llama-server was started without --mmproj, so it cannot read images"
+                : "Attach images (or paste / drop them here)"
+            }
+          >
+            image
+          </button>
           {streamingId ? (
             <button type="button" className="btn danger" onClick={onStop}>
               stop
             </button>
           ) : (
-            <button type="button" className="btn primary" onClick={onSend} disabled={!draft.trim() && attachments.length === 0}>
+            <button type="button" className="btn primary" onClick={onSend} disabled={(!draft.trim() && attachments.length === 0 && images.length === 0) || imageBusy > 0}>
               send
             </button>
           )}
@@ -430,6 +525,15 @@ function MessageView({
         <div className="msg-body">
           <MarkdownView text={message.content} />
         </div>
+        {message.images && message.images.length > 0 && (
+          <div className="thumbs static">
+            {message.images.map((img) => (
+              <a key={img.id} className="thumb" href={imageSrc(img)} target="_blank" rel="noreferrer" title={img.name}>
+                <img src={imageSrc(img)} alt={img.name} loading="lazy" />
+              </a>
+            ))}
+          </div>
+        )}
         {message.attachments && message.attachments.length > 0 && (
           <div className="chips static">
             {message.attachments.map((a) => (

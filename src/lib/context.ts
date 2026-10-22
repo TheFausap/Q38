@@ -1,4 +1,5 @@
 import type { Attachment, ChatMessage, Compaction, Sampling, Settings } from "./types";
+import { imageTokens } from "./images";
 
 /**
  * Token accounting for the workbench.
@@ -30,6 +31,7 @@ export function attachmentTokens(a: Attachment): number {
 export function messageTokens(m: ChatMessage): number {
   let n = MESSAGE_OVERHEAD + estimateTokens(m.content);
   for (const a of m.attachments ?? []) n += attachmentTokens(a);
+  for (const img of m.images ?? []) n += imageTokens(img);
   return n;
 }
 

@@ -8,6 +8,24 @@ export type Attachment = {
   unstored?: boolean;
 };
 
+/**
+ * A picture attached to a user turn. The bytes live on the Q38 server
+ * (server/images.mjs), addressed by their hash; the message keeps only this.
+ * `data` is set instead when the server could not be reached, so the turn
+ * still carries the image — at the cost of base64 in the transcript.
+ */
+export type ImageRef = {
+  /** sha256 of the stored bytes */
+  id: string;
+  name: string;
+  mime: string;
+  width: number;
+  height: number;
+  bytes: number;
+  /** data: URL, only when the image could not be stored on the server */
+  data?: string;
+};
+
 export type Timings = {
   prompt_n?: number;
   predicted_n?: number;
@@ -80,6 +98,8 @@ export type ChatMessage = {
   sources?: { title: string; url: string }[];
   reasoning?: string;
   attachments?: Attachment[];
+  /** pictures sent with this turn (user messages only) */
+  images?: ImageRef[];
   modeTag?: string;
   timings?: Timings;
   demo?: boolean;
@@ -202,6 +222,8 @@ export type Settings = {
   autoCollapseThink: boolean;
   /** context window in tokens; 0 = read n_ctx from llama-server /props */
   contextSize: number;
+  /** attached images are downscaled to at most this many megapixels before upload */
+  imageMegapixels: number;
   /** fold the transcript automatically when the window fills up */
   autoCompact: boolean;
   /** fold once the next prompt crosses this fraction of the usable window */
@@ -312,6 +334,7 @@ export const DEFAULT_SETTINGS: Settings = {
   systemPrompt: DEFAULT_SYSTEM,
   autoCollapseThink: true,
   contextSize: 0,
+  imageMegapixels: 1,
   autoCompact: true,
   compactAt: 0.72,
   keepTailMessages: 8,
